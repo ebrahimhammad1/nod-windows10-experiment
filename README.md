@@ -1,26 +1,26 @@
 # Nod n8n for Windows 10
 
-Unofficial experimental build. Unsigned. Actual Windows 10 runtime compatibility has **not been tested**. This is not an n8n release.
+Unofficial experimental build. Unsigned. Full Windows 10 startup is **not yet confirmed**. This is not an n8n release.
 
 ## Download
 
-[**Download Windows 10 installer (.exe, 360 MiB)**](https://github.com/ebrahimhammad1/nod-windows10-experiment/releases/download/win10-0.9.4-build-45259076282/nod-n8n-Windows10-0.9.4-unsigned.exe)
+[**Download Windows 10 installer (.exe, 365 MiB)**](https://github.com/ebrahimhammad1/nod-windows10-experiment/releases/download/win10-0.9.4-build-45286515402/nod-n8n-Windows10-0.9.4-unsigned.exe)
 
-Do not bypass SmartScreen, antivirus or signature restrictions. Build and installer archive integrity checks passed, but that is not a Windows 10 runtime test. No installation on your PC has been performed.
+Do not bypass SmartScreen, antivirus or signature restrictions. Build, installer integrity and native Windows packaged-engine smoke checks passed. This is not a full Windows 10 + WSL end-to-end test. The first Windows 10 trial exposed a missing esbuild dependency; this build includes the Windows x64 package.
 
-First launch requires the matching official WSL 2 guest download, about 1.33 GB. The experimental build uses separate install/profile locations, disables official auto-updates and does not automatically launch after installation. Windows 10 22H2 build 19045 or later, x64, is required by this experimental installer.
+Local startup requires WSL 2 and may download the matching official guest archive, about 1.33 GB, when a valid copy is not already available. The experimental build uses separate install/profile locations, disables official auto-updates and does not automatically launch after installation. Windows 10 22H2 build 19045 or later, x64, is required by this experimental installer.
 
 ## Full modified source and verification
 
-- [Browse the exact modified source](https://github.com/ebrahimhammad1/nod-windows10-experiment/tree/win10-0.9.4-build-45259076282)
-- [Download complete modified source archive](https://github.com/ebrahimhammad1/nod-windows10-experiment/releases/download/win10-0.9.4-build-45259076282/nod-windows10-source.tar.gz)
-- [Release, build record and SHA256SUMS](https://github.com/ebrahimhammad1/nod-windows10-experiment/releases/tag/win10-0.9.4-build-45259076282)
+- [Browse the exact modified source](https://github.com/ebrahimhammad1/nod-windows10-experiment/tree/win10-0.9.4-build-45286515402)
+- [Download complete modified source archive](https://github.com/ebrahimhammad1/nod-windows10-experiment/releases/download/win10-0.9.4-build-45286515402/nod-windows10-source.tar.gz)
+- [Release, build record and SHA256SUMS](https://github.com/ebrahimhammad1/nod-windows10-experiment/releases/tag/win10-0.9.4-build-45286515402)
 
-Installer SHA256: `4d521ae8b6c0e400c7623e0a02d367b33ddce69ee10bbbc0834fb86722b3ce72`.
+Installer SHA256: `f3c9d11ff50ade5e07394ecf2bf0b7411a89991f6066e94e947b82b67030233c`.
 
-The exact application source is on the tagged source tree above. This default branch contains build/publishing inputs on a newer upstream snapshot, so do not treat default-branch source downloads as the installer source. The release tag points to `68aa4073fb95f84d4fd64ff099c9026daa7c2fbd`, based on upstream `2118c357299fe550bd693b8fdfd7c1b4fa580c7e` plus the reviewed Windows 10 changes and documented CI/README changes.
+The exact application source is on the tagged source tree above. This default branch contains build/publishing inputs on a newer upstream snapshot, so do not treat default-branch source downloads as the installer source. The release tag points to `854528b07af55459ce818dae285cb3947a9773d0`, based on upstream `2118c357299fe550bd693b8fdfd7c1b4fa580c7e` plus the reviewed Windows 10 changes and documented CI/README changes.
 
-This replacement build used one manual standard free GitHub Actions runner. It repairs first-launch runtime-download initialization while keeping upstream app auto-updates disabled. Inherited automatic workflows were removed from this fork only. The original project and license notices remain unchanged upstream. No paid service, personal token or code-signing bypass was used.
+This replacement build used standard free GitHub Actions runners for packaging and a separate native Windows packaged-engine smoke check. It includes the Windows esbuild optional dependency, preserves first-launch runtime-download initialization, and keeps upstream app auto-updates disabled. Inherited automatic workflows were removed from this fork only. The original project and license notices remain unchanged upstream. No paid service, personal token or code-signing bypass was used.
 
 ---
 
