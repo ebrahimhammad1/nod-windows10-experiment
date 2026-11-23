@@ -112,7 +112,12 @@ const testInstall =
   app.isPackaged &&
   JSON.parse(await readFile(join(desktopRoot, 'package.json'), 'utf8')).nodBuild?.testProfile ===
     true;
-const appName = testInstall ? 'nod Setup Test' : 'Nod';
+const appName = testInstall
+  ? 'nod Setup Test'
+  : JSON.parse(await readFile(join(desktopRoot, 'package.json'), 'utf8')).nodBuild
+        ?.experimentalWindows10
+    ? 'Nod Windows 10 Experiment'
+    : 'Nod';
 app.setName(process.platform === 'darwin' && app.isPackaged && !testInstall ? 'nod' : appName);
 const developmentDataRoot =
   !app.isPackaged || testInstall ? process.env.NOD_DESKTOP_USER_DATA : undefined;
@@ -120,7 +125,15 @@ if (developmentDataRoot && !isAbsolute(developmentDataRoot))
   throw new Error('The development profile path must be absolute.');
 app.setPath(
   'userData',
-  developmentDataRoot || join(app.getPath('appData'), testInstall ? 'nod Setup Test' : 'nod'),
+  developmentDataRoot ||
+    join(
+      app.getPath('appData'),
+      testInstall
+        ? 'nod Setup Test'
+        : appName === 'Nod Windows 10 Experiment'
+          ? 'nod-win10-experiment'
+          : 'nod',
+    ),
 );
 const profileRoot = join(app.getPath('userData'), 'profiles', 'local');
 const agentDesktop = app.isPackaged
@@ -3166,7 +3179,9 @@ else {
         return new Response(request.method === 'HEAD' ? null : response.body, { headers });
       });
       appLinksReady = true;
-      if (app.isPackaged && !testInstall) app.setAsDefaultProtocolClient('nod');
+      // Modified November 23, 2026: preserve the official nod: protocol handler.
+      if (app.isPackaged && !testInstall && appName !== 'Nod Windows 10 Experiment')
+        app.setAsDefaultProtocolClient('nod');
       if (
         app.isPackaged &&
         !testInstall &&
@@ -3189,7 +3204,17 @@ else {
           }
         }
       }
-      if (app.isPackaged && !testInstall && ['darwin', 'win32'].includes(process.platform)) {
+      // Modified November 23, 2026: experimental builds must not auto-update
+      // into an upstream installer that rejects Windows 10.
+      const { nodBuild: compatibilityBuild } = JSON.parse(
+        await readFile(join(desktopRoot, 'package.json'), 'utf8'),
+      );
+      if (
+        app.isPackaged &&
+        !testInstall &&
+        !compatibilityBuild?.experimentalWindows10 &&
+        ['darwin', 'win32'].includes(process.platform)
+      ) {
         const { nodBuild } = JSON.parse(await readFile(join(desktopRoot, 'package.json'), 'utf8'));
         const windows = process.platform === 'win32';
         if (windows)

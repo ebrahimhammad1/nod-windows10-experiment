@@ -1,5 +1,9 @@
 & {
+  # Modified November 23, 2026: never route a custom experiment to official assets.
   $ErrorActionPreference = 'Stop'
+  if ($env:NOD_EXPERIMENTAL_WINDOWS10 -eq 'true') {
+    throw 'This downloader installs official Windows 11 releases only. Use the separately built experimental source installer; publisher verification must not be disabled.'
+  }
   $ProgressPreference = 'SilentlyContinue'
   $releases = 'https://github.com/n8n-io/nod/releases'
   $legacyUpdateSource = 'https://internal.users.n8n.cloud/webhook/nod/desktop'
