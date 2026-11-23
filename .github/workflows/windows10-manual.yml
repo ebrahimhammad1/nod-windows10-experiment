@@ -26,11 +26,11 @@ jobs:
           persist-credentials: false
       - name: Verify reviewed build inputs
         run: |
-          mv 1-windows10-ci.py windows10-ci.py
-          mv 2-windows10-source.patch windows10-source.patch
+          mv 1-1-windows10-ci.py windows10-ci.py
+          mv 2-2-windows10-source.patch windows10-source.patch
           mv 3-windows10-runtime.json windows10-runtime.json
-          echo 'ed997034890ec86a09dcb890b6c132c9cd67d9fa779522f973c047bad33ac2cd  windows10-ci.py' | sha256sum -c -
-          echo 'cfd23e747805a4441ae445c10eea4e9f060418d3ecc0c9b7bc3be703a3249dec  windows10-source.patch' | sha256sum -c -
+          echo '8648ec687231e3028424ff456f75ca5db8e20728487eeaad43767d6405bda915  windows10-ci.py' | sha256sum -c -
+          echo '0dc578c78d2a47a3dbee7e4c4515cfca5c11e417a6620398cb43c8b7aab5d7fa  windows10-source.patch' | sha256sum -c -
           echo '7fcdec115347791b32c6fdec1918ddb1f2774c979f8f624b3c5c5eaa0fba42a3  windows10-runtime.json' | sha256sum -c -
           python3 windows10-ci.py prepare
       - name: Set up pinned Node.js
