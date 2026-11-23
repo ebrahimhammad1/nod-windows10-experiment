@@ -1,3 +1,31 @@
+# Nod n8n for Windows 10
+
+Unofficial experimental build. Unsigned. Actual Windows 10 runtime compatibility has **not been tested**. This is not an n8n release.
+
+## Download
+
+[**Download Windows 10 installer (.exe, 360 MiB)**](https://github.com/ebrahimhammad1/nod-windows10-experiment/releases/download/win10-0.9.4-build-45254316817/nod-n8n-Windows10-0.9.4-unsigned.exe)
+
+Do not bypass SmartScreen, antivirus or signature restrictions. Build and installer archive integrity checks passed, but that is not a Windows 10 runtime test. No installation on your PC has been performed.
+
+First launch requires the matching official WSL 2 guest download, about 1.33 GB. The experimental build uses separate install/profile locations, disables official auto-updates and does not automatically launch after installation. Windows 10 22H2 build 19045 or later, x64, is required by this experimental installer.
+
+## Full modified source and verification
+
+- [Browse the exact modified source](https://github.com/ebrahimhammad1/nod-windows10-experiment/tree/win10-0.9.4-build-45254316817)
+- [Download complete modified source archive](https://github.com/ebrahimhammad1/nod-windows10-experiment/releases/download/win10-0.9.4-build-45254316817/nod-windows10-source.tar.gz)
+- [Release, build record and SHA256SUMS](https://github.com/ebrahimhammad1/nod-windows10-experiment/releases/tag/win10-0.9.4-build-45254316817)
+
+Installer SHA256: `d86a0bf952f2633efe2160190a9ef642b18b82655c0b7b9f08d59d73b6bed5ec`.
+
+The exact application source is on the tagged source tree above. This default branch contains build/publishing inputs on a newer upstream snapshot, so do not treat default-branch source downloads as the installer source. The release tag points to `1efbe071ed598d78c4fb7a0444f2106560caa132`, based on upstream `2118c357299fe550bd693b8fdfd7c1b4fa580c7e` plus the reviewed Windows 10 changes and documented CI/README changes.
+
+The build used one manual standard free GitHub Actions runner. Inherited automatic workflows were removed from this fork only. The original project and license notices remain unchanged upstream. No paid service, personal token or code-signing bypass was used.
+
+---
+
+## Upstream documentation
+
 <p align="center">
   <a href="https://nod.n8n.io#gh-dark-mode-only"><img src="docs/src/assets/readme/hero-dark.webp" alt="n8n presents Nod: open source personal agent with its own computer" width="100%" /></a>
   <a href="https://nod.n8n.io#gh-light-mode-only"><img src="docs/src/assets/readme/hero.webp" alt="n8n presents Nod: open source personal agent with its own computer" width="100%" /></a>
