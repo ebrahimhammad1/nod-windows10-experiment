@@ -26,11 +26,11 @@ jobs:
           persist-credentials: false
       - name: Verify reviewed build inputs
         run: |
-          mv 1-1-windows10-ci.py windows10-ci.py
-          mv 2-2-windows10-source.patch windows10-source.patch
+          cp 1-windows10-esbuild-ci.py windows10-ci.py
+          cp 3-windows10-esbuild-source.patch windows10-source.patch
           mv 3-windows10-runtime.json windows10-runtime.json
-          echo '8648ec687231e3028424ff456f75ca5db8e20728487eeaad43767d6405bda915  windows10-ci.py' | sha256sum -c -
-          echo '0dc578c78d2a47a3dbee7e4c4515cfca5c11e417a6620398cb43c8b7aab5d7fa  windows10-source.patch' | sha256sum -c -
+          echo '57199e74cd78e56a1a47b7e1aa2d290df5311851386867a7f8c4116f50f563dd  windows10-ci.py' | sha256sum -c -
+          echo '6664f26973ec1a367c8a68885b01fa05211a3af22addf317ec53c2af951ce549  windows10-source.patch' | sha256sum -c -
           echo '7fcdec115347791b32c6fdec1918ddb1f2774c979f8f624b3c5c5eaa0fba42a3  windows10-runtime.json' | sha256sum -c -
           python3 windows10-ci.py prepare
       - name: Set up pinned Node.js
@@ -51,7 +51,45 @@ jobs:
           test "$(df --output=avail -k . | tail -1)" -gt 9000000
       - name: Build and verify unsigned experimental installer
         run: python3 windows10-ci.py build
-      - name: Publish complete source and unsigned installer
+      - name: Stage complete source and unsigned installer as draft
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 windows10-ci.py publish
+
+  windows-engine-smoke:
+    needs: build
+    if: github.repository == 'ebrahimhammad1/nod-windows10-experiment' && github.event_name == 'workflow_dispatch'
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact newly built source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: windows10-source-${{ github.run_id }}
+          persist-credentials: false
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24.21.0
+      - name: Download draft installer and verify packaged engine on Windows
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = 'win10-0.9.4-build-${{ github.run_id }}'
+          gh release download $tag --repo ebrahimhammad1/nod-windows10-experiment --pattern '*.exe' --dir test-download
+          if ($LASTEXITCODE -ne 0) { throw 'Draft download failed' }
+          7z x test-download/nod-n8n-Windows10-0.9.4-unsigned.exe -otest-application -y
+          if ($LASTEXITCODE -ne 0) { throw 'Installer extraction failed' }
+          node desktop/scripts/check-windows-esbuild.mjs test-application/resources/engine
+          if ($LASTEXITCODE -ne 0) { throw 'Windows dependency resolution failed' }
+          node desktop/scripts/check-windows-engine-smoke.mjs test-application
+          if ($LASTEXITCODE -ne 0) { throw 'Windows packaged engine smoke failed' }
+      - name: Publish only after Windows smoke passed
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit win10-0.9.4-build-${{ github.run_id }} --repo ebrahimhammad1/nod-windows10-experiment --draft=false
+          if ($LASTEXITCODE -ne 0) { throw 'Publication failed' }
