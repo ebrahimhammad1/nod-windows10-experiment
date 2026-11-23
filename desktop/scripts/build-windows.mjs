@@ -1,3 +1,5 @@
+// Modified November 23, 2026: opt-in, non-release Windows 10 experiment.
+import { windowsCompatibilityBuild } from './windows-compatibility.mjs';
 import { copyEngineSource } from './engine-source.mjs';
 import { cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -24,6 +26,7 @@ const electronChecksums = JSON.parse(
   await readFile(join(root, 'desktop/node_modules/electron/checksums.json')),
 );
 const signed = process.env.NOD_RELEASE_BUILD === 'true';
+const compatibilityFlags = windowsCompatibilityBuild();
 const buildOptions = desktopBuildOptions();
 const updateSourceUrl = process.env.NOD_DESKTOP_UPDATE_SOURCE_URL;
 if (
@@ -73,6 +76,7 @@ if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(configuration.version))
 manifest.releaseTag = `nod-v${configuration.version}`;
 const electronVersion = configuration.devDependencies.electron;
 configuration.nodBuild = {
+  experimentalWindows10: compatibilityFlags.length > 0,
   source: await run('git', ['-C', root, 'rev-parse', 'HEAD'], { output: 'stdout' }),
   builtAt: new Date().toISOString(),
   platform: 'win32-x64',
@@ -119,6 +123,7 @@ await run(
   nsis,
   [
     `/DAPP_DIR=${application}`,
+    ...compatibilityFlags,
     `/DOUTPUT=${installer}`,
     `/DVERSION=${configuration.version}`,
     `/DICON=${join(root, 'desktop/assets/nod.ico')}`,

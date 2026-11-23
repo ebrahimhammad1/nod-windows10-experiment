@@ -1,3 +1,13 @@
+# Nod n8n for Windows 10
+
+Unofficial, experimental, unsigned build. Actual Windows 10 runtime compatibility has not been tested. This is not an n8n release. Do not bypass Windows security or signature restrictions.
+
+This branch contains the complete modified application source. The installer is built from this commit. See the repository Releases for the installer, full source archive, SHA256 hashes and build record. Installation on a real PC is not part of the build.
+
+Base upstream commit: `2118c357299fe550bd693b8fdfd7c1b4fa580c7e`. Reviewed patch SHA256: `6664f26973ec1a367c8a68885b01fa05211a3af22addf317ec53c2af951ce549`. Inherited GitHub Actions workflows were removed only from this fork branch to prevent automatic or paid runs. No application security checks were removed by that CI-only change.
+
+---
+
 <p align="center">
   <a href="https://nod.n8n.io#gh-dark-mode-only"><img src="docs/src/assets/readme/hero-dark.webp" alt="n8n presents Nod: open source personal agent with its own computer" width="100%" /></a>
   <a href="https://nod.n8n.io#gh-light-mode-only"><img src="docs/src/assets/readme/hero.webp" alt="n8n presents Nod: open source personal agent with its own computer" width="100%" /></a>
