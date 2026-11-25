@@ -11233,6 +11233,7 @@ test(
         'the receipt is committed before the real tool dispatch runs, and a later failure ends the turn visibly',
         async () => {
           const original = dependencies.runTurn;
+          const originalIntegration = dependencies.integration;
           try {
             for (const failing of [false, true]) {
               const prompt = `ack-order ${failing ? 'failure' : 'success'} ${randomUUID()}`;
@@ -11241,30 +11242,17 @@ test(
               const seen: Array<{ ackBeforeDispatch: boolean; finalBeforeDispatch: boolean }> = [];
               const runtime = createAgentRuntime({
                 workspace: fakeWorkspace(),
-                computer: fakeComputer({
-                  act: async () => {
-                    const rows = (
-                      await db.pool.query(
-                        "SELECT stream_id,text FROM messages WHERE turn_id=$1 AND role='assistant'",
-                        [turnId],
-                      )
-                    ).rows;
-                    seen.push({
-                      ackBeforeDispatch: rows.some(
-                        (row) => String(row.stream_id) === `ack:${turnId}`,
-                      ),
-                      finalBeforeDispatch: rows.some((row) => row.text === `done: ${prompt}`),
-                    });
-                    return { text: 'Fixture page', url: 'https://example.com' };
-                  },
-                }),
+                computer: fakeComputer(),
                 agent: {
                   open: async (input) => ({
                     resumed: false,
                     async prompt() {
                       const opened = await input.tools
-                        .find((tool) => tool.name === 'browser')!
-                        .execute({ action: 'open', url: 'https://example.com/' })
+                        .find((tool) => tool.name === 'apps')!
+                        .execute({
+                          action: 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID',
+                          args: { message_id: 'synthetic-ack-order' },
+                        })
                         .catch((error: unknown) => `threw: ${String(error)}`);
                       toolResult = JSON.stringify(opened).slice(0, 300);
                       if (failing) throw new ModelRequestError('429 Too Many Requests');
@@ -11278,6 +11266,23 @@ test(
                   dispose() {},
                 },
               });
+              dependencies.integration = async (turn, action, args, options) => {
+                if (action === 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID' && turnId) {
+                  const rows = (
+                    await db.pool.query(
+                      "SELECT stream_id,text FROM messages WHERE turn_id=$1 AND role='assistant'",
+                      [turnId],
+                    )
+                  ).rows;
+                  seen.push({
+                    ackBeforeDispatch: rows.some(
+                      (row) => String(row.stream_id) === `ack:${turnId}`,
+                    ),
+                    finalBeforeDispatch: rows.some((row) => row.text === `done: ${prompt}`),
+                  });
+                }
+                return originalIntegration!(turn, action, args, options);
+              };
               dependencies.runTurn = (context) => {
                 if (context.prompt !== prompt) return original!(context);
                 turnId = context.turnId;
@@ -11314,6 +11319,7 @@ test(
             }
           } finally {
             dependencies.runTurn = original;
+            dependencies.integration = originalIntegration;
           }
         },
       );
