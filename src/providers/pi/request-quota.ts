@@ -7,10 +7,13 @@
 // Staleness: the learned limit is the provider's per-minute input-token cap
 // at the moment it rejected us. Account tier changes move it in either
 // direction, so (a) the newest provider-reported value always replaces the
-// old one, up or down, and (b) a learned limit expires after QUOTA_TTL_MS;
-// the next request then goes to the provider again, which either succeeds or
-// re-teaches the current limit. A stale limit can therefore never lock a
-// connection permanently: worst case one real request per TTL window fails.
+// old one, up or down, (b) a learned limit expires after QUOTA_TTL_MS, and
+// (c) even inside the TTL a single probe request is allowed through every
+// PROBE_INTERVAL_MS: if the connection's limit rose (tier upgrade) the probe
+// succeeds and normal traffic resumes within minutes instead of hours; if
+// not, the provider rejects it and re-teaches the current limit. A learned
+// limit can therefore never lock a connection for more than one probe
+// interval, and the probe costs at most one rejected request.
 
 import { estimateTokens } from '@earendil-works/pi-coding-agent';
 import { contentText, type Context } from '@earendil-works/pi-ai';
@@ -19,8 +22,10 @@ import { oversizedRequestLimit } from '../../shared/oversized-request.ts';
 export type RequestQuota = { limit: number; requested: number; at: number };
 
 export const QUOTA_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+export const PROBE_INTERVAL_MS = 5 * 60 * 1000; // one probe per 5 minutes
 
 const learned = new Map<string, RequestQuota>();
+const lastRefusal = new Map<string, number>();
 
 export function learnRequestQuota(
   key: string,
@@ -34,6 +39,9 @@ export function learnRequestQuota(
   // get stricter (limit drops) and tiers get upgraded (limit rises).
   const quota = { limit: parsed.limit, requested: parsed.requested, at: now };
   learned.set(key, quota);
+  // The rejection itself is a fresh check: the probe interval starts now, so
+  // an immediate retry is refused locally and the next probe is one interval out.
+  lastRefusal.set(key, now);
   return quota;
 }
 
@@ -89,7 +97,14 @@ export function quotaPreflightError(
   if (!quota) return undefined;
   const estimate = estimateRequestTokens(context);
   if (estimate <= quota.limit) return undefined;
+  // Bounded probe: one request per interval goes through to re-check the
+  // limit against the provider instead of trusting the learned value.
+  const refusedAt = lastRefusal.get(key);
+  if (refusedAt === undefined || now - refusedAt >= PROBE_INTERVAL_MS) {
+    lastRefusal.set(key, now);
+    return undefined;
+  }
   return new Error(
-    `Nod did not send this request: it is roughly ${estimate.toLocaleString('en-US')} tokens (an estimate; the provider counts exactly) and this connection reported a limit of ${quota.limit.toLocaleString('en-US')} input tokens per minute ${Math.round((now - quota.at) / 60000)} minutes ago. Choose a model or connection with a higher limit, or shorten the conversation. If the connection's plan changed, the limit is re-checked automatically within a few hours.`,
+    `Nod did not send this request: it is roughly ${estimate.toLocaleString('en-US')} tokens (an estimate; the provider counts exactly) and this connection reported a limit of ${quota.limit.toLocaleString('en-US')} input tokens per minute ${Math.round((now - quota.at) / 60000)} minutes ago. Choose a model or connection with a higher limit, or shorten the conversation. The connection is re-checked automatically every few minutes and whenever its provider reports a different limit.`,
   );
 }

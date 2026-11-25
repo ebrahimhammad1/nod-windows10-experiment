@@ -14,6 +14,7 @@ import {
   knownRequestQuota,
   quotaPreflightError,
   QUOTA_TTL_MS,
+  PROBE_INTERVAL_MS,
 } from '../src/providers/pi/request-quota.ts';
 
 const REQUESTS: any[] = [];
@@ -306,4 +307,18 @@ test('the preflight refusal states the estimate basis and the re-check path', ()
   assert.match(error!.message, /estimate/i);
   assert.match(error!.message, /100/);
   assert.match(error!.message, /re-checked/i);
+});
+
+test('a refused connection is probed every interval, so an upgrade is picked up within minutes', () => {
+  const key = `quota-${randomUUID()}`;
+  const at = 1_000_000;
+  learnRequestQuota(key, 'Request too large for model `qwen-x` on tokens per minute (ITPM): Limit 100, Requested 15463', at);
+  const context = { messages: [{ role: 'user', content: 'x'.repeat(10_000), timestamp: 0 }] } as never;
+  // Immediately after the rejection the retry is refused locally (no probe yet).
+  assert.ok(quotaPreflightError(key, context, at + 60_000));
+  // After one probe interval the next request goes through to the provider:
+  // if the limit rose it succeeds; if not, the provider rejects and re-teaches.
+  assert.equal(quotaPreflightError(key, context, at + 60_000 + PROBE_INTERVAL_MS), undefined);
+  // The probe armed the clock again: the request right behind it is refused.
+  assert.ok(quotaPreflightError(key, context, at + 60_000 + PROBE_INTERVAL_MS + 1000));
 });
