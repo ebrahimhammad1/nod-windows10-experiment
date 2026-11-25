@@ -13,3 +13,55 @@ index a106f863ccb322b58090f1c4ba82d62b0b2723f2..ac8fb374d7d17dd63e6239eca8d58b52
      /^(Throttling error|Service unavailable):/i, // AWS Bedrock non-overflow errors (human-readable prefixes from formatBedrockError)
      /rate limit/i, // Generic rate limiting
      /too many requests/i, // Generic HTTP 429 style
+diff --git a/dist/utils/retry.js b/dist/utils/retry.js
+--- a/dist/utils/retry.js	2026-11-26 00:50:21.786704250 +0200
++++ b/dist/utils/retry.js	2026-11-26 00:50:21.786719190 +0200
+@@ -153,10 +153,33 @@
+     "subscription_sharing_user_unavailable",
+ ]);
+ export const DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 60_000;
+-export function retryDelayMs(policy, attempt) {
++export const DEFAULT_RETRY_AFTER_MAX_MS = 60_000;
++/**
++ * Best-effort parse of a provider-supplied retry-after hint from an error
++ * message (e.g. "retry after 12s", "retry-after: 12", "retry in 12 seconds",
++ * Google-style "retryDelay": "12s"). Returns milliseconds or undefined.
++ */
++export function parseRetryAfterMs(errorMessage) {
++    if (!errorMessage)
++        return undefined;
++    const match = errorMessage.match(/retry[- ]?after\s*:?\s*(\d+(?:\.\d+)?)\s*s/i)
++        ?? errorMessage.match(/retry in (\d+(?:\.\d+)?)\s*seconds?/i)
++        ?? errorMessage.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/i);
++    if (!match)
++        return undefined;
++    const ms = Number(match[1]) * 1000;
++    return Number.isFinite(ms) ? Math.ceil(ms) : undefined;
++}
++export function retryDelayMs(policy, attempt, errorMessage) {
+     const delay = policy.baseDelayMs * 2 ** Math.max(0, attempt - 1);
+     const safeDelay = Number.isSafeInteger(delay) ? delay : Number.MAX_SAFE_INTEGER;
+-    return Math.min(safeDelay, policy.maxAgentDelayMs ?? DEFAULT_MAX_AGENT_RETRY_DELAY_MS);
++    const cap = policy.maxAgentDelayMs ?? DEFAULT_MAX_AGENT_RETRY_DELAY_MS;
++    const hintMs = parseRetryAfterMs(errorMessage);
++    // Never retry earlier than an explicit provider hint, and never wait
++    // longer than the cap: a hint beyond the cap fails fast instead.
++    if (hintMs !== undefined && hintMs > cap)
++        return -1;
++    return Math.min(Math.max(safeDelay, hintMs ?? 0), cap);
+ }
+ class RetrySleepAbortError extends Error {
+     constructor() {
+@@ -224,7 +247,11 @@
+         }
+         attempt++;
+         lastRetry = { attempt, errorMessage: response.errorMessage || "Unknown error" };
+-        const delayMs = retryDelayMs(policy, attempt);
++        const delayMs = retryDelayMs(policy, attempt, lastRetry.errorMessage);
++        if (delayMs < 0) {
++            await callbacks?.onRetryFinished?.(false, attempt, lastRetry.errorMessage);
++            return response;
++        }
+         await callbacks?.onRetryScheduled?.(attempt, maxAttempts, delayMs, lastRetry.errorMessage);
+         // Normalize aborts during retry backoff to the same AssistantMessage shape as
+         // provider stream aborts, so callers do not need to care when cancellation happened.

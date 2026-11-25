@@ -70,6 +70,35 @@ test('turn policy is one retry with a jittered 4-6s base delay', () => {
   }
 });
 
+test('provider retry-after hint is honored and never shortened', async () => {
+  const scheduled = [];
+  const result = await retryAssistantCall(
+    async () => message('error', 'HTTP 429 too many requests, retry after 12s'),
+    { enabled: true, maxRetries: 1, baseDelayMs: 4000, maxAgentDelayMs: RETRY_MAX_DELAY_MS },
+    undefined,
+    { onRetryScheduled: (attempt, max, delayMs) => scheduled.push({ attempt, max, delayMs }) },
+  );
+  assert.equal(result.stopReason, 'error');
+  assert.deepEqual(scheduled, [{ attempt: 1, max: 1, delayMs: 12_000 }]);
+});
+
+test('a provider hint beyond the cap fails fast instead of retrying early', async () => {
+  let calls = 0;
+  const scheduled = [];
+  const result = await retryAssistantCall(
+    async () => {
+      calls++;
+      return message('error', 'HTTP 429 too many requests, retry after 120s');
+    },
+    { enabled: true, maxRetries: 1, baseDelayMs: 4000, maxAgentDelayMs: RETRY_MAX_DELAY_MS },
+    undefined,
+    { onRetryScheduled: (attempt, max, delayMs) => scheduled.push({ attempt, max, delayMs }) },
+  );
+  assert.equal(result.stopReason, 'error');
+  assert.equal(calls, 1, 'no retry earlier than the provider hint');
+  assert.deepEqual(scheduled, [], 'no retry scheduled when the hint exceeds the cap');
+});
+
 test('computed delay is capped at the 30s maximum', async () => {
   const scheduled = [];
   await retryAssistantCall(
