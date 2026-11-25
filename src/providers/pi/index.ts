@@ -62,6 +62,7 @@ import { createSandbox, workspaceOutputs } from './sandbox.ts';
 import { untrustedBlock } from '../../shared/untrusted.ts';
 import { draft2020Schema } from '../../shared/json-schema.ts';
 import { isPublicAddress, publicLookup } from '../agent-browser/network.ts';
+import { turnRetryPolicy } from './retry-policy';
 
 function isFinalAnswer(signature: string | undefined) {
   if (!signature?.startsWith('{')) return false;
@@ -827,10 +828,10 @@ export function createPiAgent(options: {
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
         // Bounded retry for transient provider failures (e.g. 429 rate
-        // limits): one retry with a base delay, whether or not backup
-        // models are configured, so a shared-pool throttle doesn't fail
-        // the turn immediately.
-        retry: { baseDelayMs: 4000, maxRetries: 1 },
+        // limits): one retry with a jittered base delay, whether or not
+        // backup models are configured, so a shared-pool throttle doesn't
+        // fail the turn immediately.
+        retry: turnRetryPolicy(),
       });
       const extensionLoader = new DefaultResourceLoader({
         cwd: input.workspace.path,

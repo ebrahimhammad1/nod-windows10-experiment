@@ -13,6 +13,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { retryAssistantCall } from '@earendil-works/pi-ai';
 
+import {
+  RETRY_BASE_DELAY_MS,
+  RETRY_JITTER_MS,
+  RETRY_MAX_DELAY_MS,
+  turnRetryPolicy,
+} from '../src/providers/pi/retry-policy';
+
 const POLICY = { enabled: true, maxRetries: 1, baseDelayMs: 4000 };
 
 function message(stopReason, errorMessage) {
@@ -51,6 +58,27 @@ test('retryable 429 is retried exactly once with the configured backoff', async 
   assert.equal(result.stopReason, 'stop');
   assert.equal(calls, 2, 'one produce retry, bounded by maxRetries');
   assert.deepEqual(scheduled, [{ attempt: 1, max: 1, delayMs: 4000 }]);
+});
+
+test('turn policy is one retry with a jittered 4-6s base delay', () => {
+  for (const random of [() => 0, () => 0.999, Math.random]) {
+    const policy = turnRetryPolicy(random);
+    assert.equal(policy.maxRetries, 1);
+    assert.ok(policy.baseDelayMs >= RETRY_BASE_DELAY_MS);
+    assert.ok(policy.baseDelayMs < RETRY_BASE_DELAY_MS + RETRY_JITTER_MS);
+    assert.equal(policy.maxAgentDelayMs, RETRY_MAX_DELAY_MS);
+  }
+});
+
+test('computed delay is capped at the 30s maximum', async () => {
+  const scheduled = [];
+  await retryAssistantCall(
+    async () => message('error', 'HTTP 429 too many requests'),
+    { enabled: true, maxRetries: 1, baseDelayMs: 120_000, maxAgentDelayMs: RETRY_MAX_DELAY_MS },
+    undefined,
+    { onRetryScheduled: (attempt, max, delayMs) => scheduled.push({ attempt, max, delayMs }) },
+  );
+  assert.deepEqual(scheduled, [{ attempt: 1, max: 1, delayMs: RETRY_MAX_DELAY_MS }]);
 });
 
 test('non-retryable quota failure is not retried', async () => {
