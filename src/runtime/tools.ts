@@ -417,7 +417,7 @@ export const toolDefinitions = {
       offset: Type.Optional(Type.Integer({ minimum: 0 })),
       name: Type.Optional(Type.String({ minLength: 1 })),
     }),
-    true,
+    false,
     ['sign_in', 'browser_session', 'pay'],
   ),
   sign_in: defineTool(
@@ -571,7 +571,6 @@ export const toolDefinitions = {
         ),
       ),
     }),
-    true,
   ),
   computer: defineTool(
     'computer',
@@ -601,7 +600,6 @@ export const toolDefinitions = {
       role: Type.Optional(Type.String()),
       keys: Type.Optional(Type.String()),
     }),
-    true,
   ),
   manage_apps: defineTool(
     'manage_apps',
@@ -618,7 +616,6 @@ export const toolDefinitions = {
       ),
       proposal: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     }),
-    true,
   ),
   memory: defineTool(
     'memory',
@@ -627,7 +624,6 @@ export const toolDefinitions = {
       action: literals(memoryActions),
       args: Type.Record(Type.String(), Type.Unknown()),
     }),
-    true,
   ),
   nod: defineTool(
     'nod',

@@ -17,6 +17,7 @@ import {
 import { logFailure } from './failure-log.ts';
 import { cancelTurnOperations } from './turn-cancellation.ts';
 import { modelFailureReason, modelQuotaFailure } from '../shared/model-quota.ts';
+import { oversizedRequestLimit } from '../shared/oversized-request.ts';
 import { appPages } from '../shared/app-links.ts';
 import { pendingAnswerChoicesSql } from './answer-choices.ts';
 import { randomUUID } from 'node:crypto';
@@ -1491,12 +1492,10 @@ function modelRecoveryAdvice(text: string) {
           : '';
     return `The provider is rate-limiting requests right now.${hint} Retry in a moment, or choose another model or connection.`;
   }
-  const oversized = text.match(
-    /\brequest too large\b.{0,250}?\btokens per minute\s*\((?:I|O)?TPM\):\s*Limit\s+(\d{1,9}),\s*Requested\s+(\d{1,9})/is,
-  );
-  if (oversized && Number(oversized[1]) > 0 && Number(oversized[2]) > Number(oversized[1]))
-    return Number(oversized[2]) - Number(oversized[1]) > 4000
-      ? `The provider reports a limit of ${Number(oversized[1]).toLocaleString('en-US')} tokens per minute for this connection, and this request needs ${Number(oversized[2]).toLocaleString('en-US')}. Nod's own instructions and tool definitions are part of every request, so even a short message exceeds it. Choose a model or connection with a higher limit.`
+  const oversized = oversizedRequestLimit(text);
+  if (oversized)
+    return oversized.requested - oversized.limit > 4000
+      ? `The provider reports a limit of ${oversized.limit.toLocaleString('en-US')} tokens per minute for this connection, and this request needs ${oversized.requested.toLocaleString('en-US')}. Nod's own instructions and tool definitions are part of every request, so even a short message exceeds it. Choose a model or connection with a higher limit.`
       : 'Shorten the conversation or choose a model with a higher tokens-per-minute limit.';
   if (quota?.kind !== 'daily_quota') return '';
   const seconds = (quota.retryAfterMs ?? 0) / 1000;

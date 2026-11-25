@@ -36,6 +36,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { createPiModelRuntime } from './models.ts';
 import { createTurnFallback, modelKey } from './fallback.ts';
+import { learnRequestQuota, quotaPreflightError } from './request-quota.ts';
 import { modelContext } from './context.ts';
 import { createContextOutput, toolOutputReference } from './context-output.ts';
 import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './audio.ts';
@@ -861,14 +862,19 @@ export function createPiAgent(options: {
                             )
                             .map((entry) => entry.name),
                         }),
-                        description: tool.description.replaceAll('tool_search', 'nod_tool_search'),
+                        description: tool.description
+                          .replaceAll('tool_search', 'nod_tool_search')
+                          .replace('Defaults to 8.', 'Defaults to 4.'),
                         execute: async (id, params, signal, update, context) => {
                           if (budget.compact) pi.setActiveTools(compactTools);
                           const result = await tool.execute(
                             id,
                             budget.compact
                               ? ({ ...(params as object), limit: 1 } as typeof params)
-                              : params,
+                              : // Keep each load small: every loaded schema is part of later
+                                // requests, and a search usually wants one or two tools. The
+                                // model can still pass a higher limit explicitly.
+                                ({ limit: 4, ...(params as object) } as typeof params),
                             signal,
                             update,
                             context,
@@ -1193,8 +1199,24 @@ export function createPiAgent(options: {
 
       const stream = session.agent.streamFunction;
       session.agent.streamFunction = async (target, context, options) => {
-        const response = await stream(target, context, options);
-        if (compaction) compaction.requests.push(await response.result());
+        // Single-connection turns have no fallback to preflight per candidate,
+        // so refuse doomed requests and learn provider-reported limits here.
+        const quotaKey = turnModels.get(input.turnId) ?? (access ? modelKey(access) : undefined);
+        if (!fallback && quotaKey) {
+          const refused = quotaPreflightError(quotaKey, context);
+          if (refused) throw refused;
+        }
+        let response;
+        try {
+          response = await stream(target, context, options);
+        } catch (error) {
+          if (!fallback && quotaKey)
+            learnRequestQuota(quotaKey, error instanceof Error ? error.message : String(error));
+          throw error;
+        }
+        const result = await response.result();
+        if (!fallback && quotaKey) learnRequestQuota(quotaKey, result.errorMessage);
+        if (compaction) compaction.requests.push(result);
         return response;
       };
 

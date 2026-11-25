@@ -12,6 +12,7 @@ import {
 } from '@earendil-works/pi-ai';
 import { estimateTokens } from '@earendil-works/pi-coding-agent';
 import type { ModelAccess } from '../../ports/models.ts';
+import { learnRequestQuota, quotaPreflightError } from './request-quota.ts';
 import type { createPiModelRuntime } from './models.ts';
 import { hasNativeAudio, readsNativeAudio } from './audio.ts';
 
@@ -98,13 +99,18 @@ export function createTurnFallback(options: {
     context: Context,
     streamOptions: SimpleStreamOptions | undefined,
   ) {
+    const candidate = candidates[index]!;
+    // Refuse locally only when this connection itself reported a per-minute
+    // input limit that even the estimated request exceeds; an unknown quota
+    // stays unknown and the request goes to the provider.
+    const refused = quotaPreflightError(modelKey(candidate.access), context);
+    if (refused) throw refused;
     if (index === 0)
       return {
         connection: options.primary.connection,
         model: target,
         upstream: options.primary.stream(target, context, streamOptions),
       };
-    const candidate = candidates[index]!;
     const { choice } = candidate.access.definition;
     if (!fits(choice, context))
       throw new Error(`${choice.name} can't take this conversation, so Nod didn't try it.`);
@@ -153,6 +159,7 @@ export function createTurnFallback(options: {
             const held: AssistantMessageEvent[] = [];
             let failure: AssistantMessage | undefined;
             for await (const event of opened.upstream) {
+              if (event.type === 'error') learnRequestQuota(modelKey(access), event.error.errorMessage);
               if (!sent && event.type === 'start') {
                 held.push(event);
                 continue;
@@ -205,6 +212,7 @@ export function createTurnFallback(options: {
             }
             reason = error instanceof Error ? error.message : String(error);
           }
+          learnRequestQuota(modelKey(access), reason);
           tried.push(`${access.provider} / ${access.definition.choice.id}: ${reason}`);
           move(index + 1);
         }
