@@ -820,6 +820,43 @@ export function createPiAgent(options: {
           },
         })),
       ];
+      // Compact gateway: one small always-on schema that calls any deferred
+      // tool by name, so a model that already knows the tool (from an earlier
+      // search or earlier in the conversation) skips the search round trip,
+      // and a minimal tool set can keep full capability without declaring
+      // every schema. The dispatched call runs through the same mapped
+      // definition as a direct call, so the target keeps its companions,
+      // bounded output, validation, approvals and execution path.
+      tools.push({
+        name: 'nod_tool',
+        label: 'nod tool',
+        description:
+          'Call one load-on-demand Nod tool by name with its arguments. Use nod_tool_search first to discover a tool and read its schema unless you already know them.',
+        parameters: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Name of the load-on-demand tool to call.' },
+            args: { type: 'object', description: 'Arguments for that tool.' },
+          },
+          required: ['name', 'args'],
+          additionalProperties: false,
+        } as ToolDefinition['parameters'],
+        exposure: 'direct' as const,
+        executionMode: 'sequential' as const,
+        execute: async (id, args, signal, onUpdate, context) => {
+          const { name, args: forwarded } = (args ?? {}) as {
+            name?: string;
+            args?: Record<string, unknown>;
+          };
+          const mapped = name === 'browser' ? 'nod_browser' : name;
+          const target = tools.find((tool) => tool.name === mapped);
+          if (!target || target.exposure !== 'deferred')
+            throw new Error(
+              `nod_tool calls load-on-demand tools by name; "${String(name)}" is not one. Use nod_tool_search to find loadable tools.`,
+            );
+          return target.execute(id, (forwarded ?? {}) as never, signal, onUpdate, context);
+        },
+      });
       const guided = new Set<string>();
       const deferred =
         !input.restricted || budget.compact || input.tools.some((tool) => tool.deferred);
@@ -1157,6 +1194,19 @@ export function createPiAgent(options: {
             .map(([name]) => name),
         ),
       ];
+      // Turn-scoped loadout: the always-on set is everything with direct
+      // exposure. Tools loaded on demand (nod_tool_search, companions) stay
+      // active for the turn that loaded them and are evicted at the next
+      // owner-turn boundary (see prompt below), so earlier discoveries do not
+      // inflate every later request in a long conversation.
+      const exposureOf = new Map<string, ToolDefinition['exposure']>([
+        ...tools.map((tool) => [tool.name, tool.exposure] as const),
+        ...extensions.extensions.flatMap((extension) =>
+          [...extension.tools.entries()].map(
+            ([name, tool]) => [name, tool.definition.exposure] as const,
+          ),
+        ),
+      ]);
       const resumed = !restart && manager.buildSessionContext().messages.length > 0;
       const { session } = await (options.createSession ?? createAgentSession)({
         cwd: input.workspace.path,
@@ -1454,6 +1504,13 @@ export function createPiAgent(options: {
         compactContext: budget.compact,
         async prompt(text, images, audio, stablePrefixes) {
           cached.stable = stablePrefixes;
+          // Evict on-demand tools at the owner-turn boundary: no tool call is
+          // pending here, and mid-turn sequences (search, call, answer) keep
+          // everything they loaded until the turn ends.
+          if (!budget.compact)
+            session.setActiveToolsByName(
+              directTools.filter((name) => exposureOf.get(name) !== 'deferred'),
+            );
           const owner = input.ownerContext;
           const copy = manager.buildSessionContext().messages.findLast(isOwnerContext);
           if (owner && (copy as { content?: unknown } | undefined)?.content !== owner)

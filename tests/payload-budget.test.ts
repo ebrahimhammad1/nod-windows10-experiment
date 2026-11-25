@@ -85,6 +85,7 @@ const CORE_DECLARED = [
   'share_file',
   'codemode',
   'nod_tool_search',
+  'nod_tool',
 ];
 
 async function openSession(t: test.TestContext, opts?: { bigExec?: boolean }) {
@@ -321,4 +322,58 @@ test('a refused connection is probed every interval, so an upgrade is picked up 
   assert.equal(quotaPreflightError(key, context, at + 60_000 + PROBE_INTERVAL_MS), undefined);
   // The probe armed the clock again: the request right behind it is refused.
   assert.ok(quotaPreflightError(key, context, at + 60_000 + PROBE_INTERVAL_MS + 1000));
+});
+
+test('the nod_tool gateway calls a deferred tool without declaring it', async (t) => {
+  responders = [
+    callReply('nod_tool', { name: 'memory', args: { action: 'memory_find', args: { query: 'x' } } }, 'call_g'),
+    textReply('done'),
+  ];
+  callIndex = 0;
+  REQUESTS.length = 0;
+  const { session, executed } = await openSession(t);
+  await session.prompt('check my memory for x', []);
+  assert.equal(REQUESTS.length, 2, 'gateway call + answer, no search round trip');
+  assert.ok(executed.includes('memory'), 'the gateway dispatched to memory');
+  for (const [index, request] of REQUESTS.entries())
+    assert.ok(
+      !(request.tools ?? []).map((tool: any) => tool.function?.name ?? tool.name).includes('memory'),
+      `memory must never be declared (request ${index})`,
+    );
+  await session.dispose();
+});
+
+test('the nod_tool gateway refuses always-on and unknown tools with a corrective error', async (t) => {
+  responders = [
+    callReply('nod_tool', { name: 'send_message', args: {} }, 'call_g'),
+    textReply('recovered'),
+  ];
+  callIndex = 0;
+  REQUESTS.length = 0;
+  const { session, executed } = await openSession(t);
+  await session.prompt('try the gateway on send_message', []);
+  assert.ok(!executed.includes('send_message'), 'an always-on tool must not be dispatched');
+  const resultMessage = JSON.stringify(REQUESTS[1].messages.at(-1));
+  assert.match(resultMessage, /nod_tool_search/);
+  await session.dispose();
+});
+
+test('tools loaded on demand are evicted at the next owner turn', async (t) => {
+  responders = [
+    callReply('nod_tool_search', { query: 'memory' }, 'call_s'),
+    callReply('memory', { action: 'memory_find', args: { query: 'x' } }, 'call_m'),
+    textReply('done'),
+    textReply('next answer'),
+  ];
+  callIndex = 0;
+  REQUESTS.length = 0;
+  const { session, executed } = await openSession(t);
+  await session.prompt('check my memory for x', []);
+  assert.ok(executed.includes('memory'));
+  assert.ok(declared(1).includes('memory'), 'loaded within the turn');
+  await session.prompt('one more thing', []);
+  const last = REQUESTS.length - 1;
+  assert.ok(!declared(last).includes('memory'), 'evicted at the next owner turn');
+  assert.ok(declared(last).includes('nod_tool_search'), 'discovery stays available');
+  await session.dispose();
 });
