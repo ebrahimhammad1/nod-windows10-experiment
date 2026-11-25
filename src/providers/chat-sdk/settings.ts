@@ -1,4 +1,5 @@
 import { createHmac, randomBytes } from 'node:crypto';
+import { Agent, Dispatcher1Wrapper } from 'undici';
 import { isIP } from 'node:net';
 import { z } from 'zod';
 import { modelServiceError } from '../model-error.ts';
@@ -70,6 +71,23 @@ function publicWebhook(value: string | undefined, provider: string, expected?: s
   return url.href;
 }
 
+function isConnectTimeout(error: unknown) {
+  for (let depth = 0, cause: unknown = error; depth < 4 && cause && typeof cause === 'object'; depth++) {
+    const { code } = cause as { code?: unknown };
+    if (code === 'UND_ERR_CONNECT_TIMEOUT') return true;
+    cause = (cause as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+// Used ONLY as a bounded fallback after a connect timeout: Telegram's
+// endpoints all serve IPv4, and a dead IPv6 route (seen on WSL2) makes the
+// default address-family alternation hang a call. The first attempt always
+// uses the platform default, so IPv6-only networks are unaffected.
+// Reported 2026-11-25 on the pinned Windows 10 build: getMe connected, the
+// immediately following getWebhookInfo timed out (UND_ERR_CONNECT_TIMEOUT).
+let ipv4Fallback: Dispatcher1Wrapper | undefined;
+
 function unreachable(error: unknown) {
   let cause = error;
   for (let depth = 0; depth < 4 && cause && typeof cause === 'object'; depth++) {
@@ -112,11 +130,26 @@ export function createChatSdkSetupVerifier(
       );
     };
     let response: Response;
-    try {
-      response = await request(url, { ...init, signal: AbortSignal.timeout(15_000) });
-    } catch (error) {
-      throw lost(error);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        response = await request(url, {
+          ...init,
+          signal: AbortSignal.timeout(15_000),
+          ...(attempt === 1 && !options.fetch
+            ? {
+                dispatcher: (ipv4Fallback ??= new Dispatcher1Wrapper(
+                  new Agent({ connect: { family: 4, timeout: 20_000 } }),
+                )),
+              }
+            : {}),
+        } as RequestInit);
+        break;
+      } catch (error) {
+        if (attempt === 0 && isConnectTimeout(error)) continue;
+        throw lost(error);
+      }
     }
+    response = response!;
     if (response.ok) {
       const body = await response.json().catch((error: unknown) => {
         throw unreachable(error) ? lost(error) : error;
