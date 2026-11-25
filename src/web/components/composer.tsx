@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type ReactNode,
 } from 'react';
 import { EditorContent, useEditor } from '@tiptap/react';
 import type { JSONContent } from '@tiptap/core';
@@ -76,6 +77,7 @@ export type ComposerSendResult =
 
 interface ComposerProps {
   active?: boolean;
+  accessory?: ReactNode;
   draftKey?: string;
   privateReply?: boolean;
   restoreReply?(reply: Message['replyTo']): void;
@@ -346,7 +348,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [active]);
   useEffect(() => {
     if (active && recorder.phase === 'recording') sendButton.current?.focus();
-  }, [active, recorder.phase]);
+  }, [accessory,
+    active, recorder.phase]);
   useEffect(() => {
     if (
       !active ||
@@ -1209,6 +1212,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   : microphoneLabel}
               </span>
             </MicrophonePicker>
+            {accessory}
             {showStop && (
               <span className="stop-slot">
                 <Button
