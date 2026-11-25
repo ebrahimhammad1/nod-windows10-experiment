@@ -14,9 +14,10 @@ index a106f863ccb322b58090f1c4ba82d62b0b2723f2..ac8fb374d7d17dd63e6239eca8d58b52
      /rate limit/i, // Generic rate limiting
      /too many requests/i, // Generic HTTP 429 style
 diff --git a/dist/utils/retry.js b/dist/utils/retry.js
---- a/dist/utils/retry.js	2026-11-26 00:50:21.786704250 +0200
-+++ b/dist/utils/retry.js	2026-11-26 00:50:21.786719190 +0200
-@@ -153,10 +153,33 @@
+index dae863c..db7d93f 100644
+--- a/dist/utils/retry.js
++++ b/dist/utils/retry.js
+@@ -111,10 +111,33 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
      "subscription_sharing_user_unavailable",
  ]);
  export const DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 60_000;
@@ -52,7 +53,7 @@ diff --git a/dist/utils/retry.js b/dist/utils/retry.js
  }
  class RetrySleepAbortError extends Error {
      constructor() {
-@@ -224,7 +247,11 @@
+@@ -178,7 +201,11 @@ export async function retryAssistantCall(produce, policy, signal, callbacks) {
          }
          attempt++;
          lastRetry = { attempt, errorMessage: response.errorMessage || "Unknown error" };
