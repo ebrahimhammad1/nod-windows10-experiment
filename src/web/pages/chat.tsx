@@ -143,7 +143,7 @@ function Working({
   routed?: MessageWork;
 }) {
   const found = items.find((item) => !item.background && !item.taskId);
-  const chat = found?.doing === 'queued' ? undefined : found;
+  const chat = found;
   const thinking = !writing && (Boolean(found) || sending);
   const receipt = items.some((item) => !item.background && item.received)
     ? 'Got your message. I’ll read it after this step.'

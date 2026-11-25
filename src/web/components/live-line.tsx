@@ -40,7 +40,10 @@ export function LiveLine({
   const label = useRef<HTMLSpanElement>(null);
   const step = item?.step?.trim();
   const site = item?.doing === 'tool' ? item.site : null;
-  const elapsed = elapsedLabel(useQuietSeconds(item?.quietSince ?? '', quiet && Boolean(item)));
+  const total = useQuietSeconds(item?.since ?? '', quiet && Boolean(item));
+  const sinceUpdate = useQuietSeconds(item?.quietSince ?? '', quiet && Boolean(item));
+  const elapsed = elapsedLabel(total);
+  const stalled = sinceUpdate >= 30 ? `no update for ${elapsedLabel(sinceUpdate)}` : '';
   const work =
     item?.doing === 'tool'
       ? item.tool
@@ -51,7 +54,9 @@ export function LiveLine({
         : undefined;
   const described = step || (site && `Using ${site}`) || work;
   const queued = item?.doing === 'queued';
-  const meta = [step ? site || work : null, elapsed || null].filter(Boolean).join(' · ');
+  const meta = [step ? site || work : null, elapsed || null, stalled || null]
+    .filter(Boolean)
+    .join(' · ');
   useEffect(() => {
     if (label.current) label.current.title = described ? (label.current.textContent ?? '') : '';
   }, [described, meta]);

@@ -8515,7 +8515,7 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
       };
       const activity = {
         turnId: 'synthetic-turn', taskId: null, title: null, step: null, site: null,
-        since: '2026-10-26T12:00:00Z',
+        since: new Date().toISOString(),
       };
       try {
         await render({ requestedMessage: { id: 'synthetic-send', text: 'Synthetic request' },
@@ -8558,10 +8558,20 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
         assert.equal(document.querySelector('.thinking')?.textContent?.includes('Working…'), true);
         assert.ok(!document.querySelector('.thinking').textContent.includes('hotel'));
         state = { ...state, activity: [{ ...activity, doing: 'tool', site: 'example.test', step: 'Comparing prices',
+          since: new Date(Date.now() - 300_000).toISOString(),
           quietSince: new Date(Date.now() - 150_000).toISOString(), received: true }] };
         await render();
-        assert.equal(document.querySelector('.thinking .working-text')?.textContent, 'Comparing prices · example.test · 2 min');
+        assert.equal(document.querySelector('.thinking .working-text')?.textContent, 'Comparing prices · example.test · 5 min · no update for 2 min');
         assert.ok(document.querySelector('.thinking .working-receipt'));
+        // total time counts from turn start and survives queued -> model -> step transitions (not reset by the last event)
+        const start = new Date(Date.now() - 90_000).toISOString();
+        for (const [detail, text] of [[{ doing: 'queued', quietSince: new Date().toISOString() }, 'Waiting to start… · 1 min'],
+          [{ doing: 'model', model: 'M', quietSince: new Date().toISOString() }, 'Waiting for M · 1 min'],
+          [{ doing: 'tool', step: 'Checking', quietSince: new Date().toISOString() }, 'Checking · 1 min']]) {
+          state = { ...state, activity: [{ ...activity, since: start, ...detail }] };
+          await render();
+          assert.equal(document.querySelector('.thinking .working-text')?.textContent, text);
+        }
         state = { ...state, activity: [{ ...activity, background: true }] };
         await render();
         assert.equal(Boolean(document.querySelector('.thinking')), false);
