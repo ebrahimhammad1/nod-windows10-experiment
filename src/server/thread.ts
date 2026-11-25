@@ -389,6 +389,36 @@ async function insertEvent(
   );
 }
 
+// Tool labels that report, search or take notes. They are not execution, so they never trigger the receipt.
+const quietTools = new Set([
+  'set status',
+  'tool search',
+  'skills',
+  'send message',
+  'ask user',
+  'share file',
+  'memory learn',
+  'history search',
+]);
+
+export function executionAckText(prompt: string) {
+  return /[\u0600-\u06ff]/.test(prompt)
+    ? 'تمام، بدأت أشتغل على طلبك.'
+    : "Got it, I've started working on this.";
+}
+
+// A short receipt written once, the first time a user turn really starts executing a tool.
+// It states only that work began, never an outcome, and is not the final reply.
+export async function insertExecutionAck(client: PoolClient, turn: TurnRef, prompt: string) {
+  const streamId = `ack:${turn.turnId}`;
+  const exists = await client.query(
+    'SELECT 1 FROM messages WHERE owner_id=$1 AND turn_id=$2 AND (stream_id=$3 OR role=$4) LIMIT 1',
+    [ownerId, turn.turnId, streamId, 'assistant'],
+  );
+  if (exists.rowCount) return;
+  await insertAssistantMessage(client, turn, executionAckText(prompt), [], streamId);
+}
+
 export async function recordIntent(client: PoolClient, turnId: string, line: string, steers = 0) {
   await client.query(
     `WITH s AS (SELECT COALESCE(max(created_at),'-infinity') AS at,count(*)::int AS n FROM turn_events
@@ -2405,8 +2435,22 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
         ),
       };
     };
+    const ackEligible =
+      turn.source === 'user' &&
+      !turn.background &&
+      turn.session_id === threadId &&
+      providerChannel === 'web' &&
+      !String(turn.source_id ?? '').startsWith('reaction-reply:');
+    let acknowledged = false;
     const emit = async (type: string, summary: string, event?: ExecutionEvent) => {
-      await current((client) => insertEvent(client, turnId, type, summary, event));
+      const ack =
+        ackEligible && !acknowledged && type === 'tool_start' && !quietTools.has(summary);
+      if (ack) acknowledged = true;
+      await current(async (client) => {
+        await insertEvent(client, turnId, type, summary, event);
+        if (ack) await insertExecutionAck(client, ref, String(turn.prompt ?? ''));
+      });
+      if (ack) refresh();
       working();
     };
     const { reactToMessage, connections, browserConnection } = dependencies;

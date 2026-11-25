@@ -11133,7 +11133,7 @@ test(
                 assert.equal(
                   (
                     await db.pool.query(
-                      "SELECT 1 FROM messages WHERE turn_id=$1 AND role='assistant'",
+                      "SELECT 1 FROM messages WHERE turn_id=$1 AND role='assistant' AND COALESCE(stream_id,'') NOT LIKE 'ack:%'",
                       [active!.turnId],
                     )
                   ).rowCount,
@@ -11156,6 +11156,51 @@ test(
         },
       );
 
+      await t.test(
+        'a web turn gets one receipt when real execution starts, not for quick answers',
+        async () => {
+          const original = dependencies.runTurn;
+          try {
+            for (const [prompt, steps, expected] of [
+              ['ack-quick Synthetic question', ['send message'], 0],
+              ['ack-work Synthetic request', ['set status', 'bash', 'bash', 'send message'], 1],
+              ['ack-arabic طلب تجريبي', ['bash'], 1],
+            ] as const) {
+              dependencies.runTurn = async (context) => {
+                if (context.prompt !== prompt) return original!(context);
+                for (const step of steps) await context.emit('tool_start', step);
+                await context.reply(`done: ${context.prompt}`);
+                return { status: 'succeeded' };
+              };
+              const sent = await thread.submitUserMessage(prompt);
+              await waitFor(settled(sent.turnId));
+              const rows = (
+                await db.pool.query(
+                  "SELECT text,stream_id FROM messages WHERE turn_id=$1 AND role='assistant' ORDER BY created_at,id",
+                  [sent.turnId],
+                )
+              ).rows;
+              const acks = rows.filter((row) => String(row.stream_id).startsWith('ack:'));
+              assert.equal(acks.length, expected, prompt);
+              if (expected) {
+                assert.equal(acks[0].stream_id, `ack:${sent.turnId}`);
+                assert.equal(
+                  rows[0].stream_id,
+                  acks[0].stream_id,
+                  'receipt precedes the final reply',
+                );
+                assert.equal(rows.at(-1)!.text, `done: ${prompt}`);
+                assert.match(
+                  acks[0].text,
+                  prompt.includes('طلب') ? /[\u0600-\u06ff]/ : /started working/,
+                );
+              } else assert.equal(rows.at(-1)!.text, `done: ${prompt}`);
+            }
+          } finally {
+            dependencies.runTurn = original;
+          }
+        },
+      );
       await t.test('retired confirmations stay out of later agent context', async () => {
         const activeId = (await thread.activeThread(db.pool)).id;
         const visibleId = randomUUID();
@@ -11306,6 +11351,7 @@ test(
               prompt: 'model-plain-rate-limit-fixture',
               error: prefix + '429 Too Many Requests',
               reason: /429 Too Many Requests/,
+              advice: /The provider is rate-limiting requests right now\. Retry in a moment/,
             },
             {
               prompt: 'model-zero-quota-fixture',
