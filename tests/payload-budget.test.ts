@@ -88,7 +88,10 @@ const CORE_DECLARED = [
   'nod_tool',
 ];
 
-async function openSession(t: test.TestContext, opts?: { bigExec?: boolean }) {
+async function openSession(
+  t: test.TestContext,
+  opts?: { bigExec?: boolean; validatingMemory?: boolean },
+) {
   const modelId = `fixture-${randomUUID().slice(0, 8)}`;
   const { createPiAgent } = await import('../src/providers/pi/index.ts');
   const { toolDefinitions } = await import('../src/runtime/tools.ts');
@@ -113,6 +116,15 @@ async function openSession(t: test.TestContext, opts?: { bigExec?: boolean }) {
     ...(def.eager ? { eager: true } : {}),
     ...(def.companions?.length ? { companions: def.companions } : {}),
     execute: async (args: any) => {
+      if (opts?.validatingMemory && def.name === 'memory') {
+        // Mirror the production bind() contract: invalid args are rejected
+        // with a corrective error naming the tool and the failing path.
+        const actions = ['memory_read', 'memory_find', 'history_search'];
+        if (!actions.includes(String((args as any)?.action)))
+          throw new Error(
+            `Invalid memory arguments at /action: must be equal to one of the allowed values. Correct the arguments and call memory again.`,
+          );
+      }
       executed.push(def.name);
       return { content: [{ type: 'text' as const, text: `${def.name} fixture result` }] };
     },
@@ -375,5 +387,66 @@ test('tools loaded on demand are evicted at the next owner turn', async (t) => {
   const last = REQUESTS.length - 1;
   assert.ok(!declared(last).includes('memory'), 'evicted at the next owner turn');
   assert.ok(declared(last).includes('nod_tool_search'), 'discovery stays available');
+  await session.dispose();
+});
+
+test('a model that calls the gateway with wrong args recovers from the corrective error', async (t) => {
+  responders = [
+    callReply('nod_tool', { name: 'memory', args: { action: 'remember everything' } }, 'call_bad'),
+    callReply('nod_tool', { name: 'memory', args: { action: 'memory_find', args: { query: 'x' } } }, 'call_good'),
+    textReply('done'),
+  ];
+  callIndex = 0;
+  REQUESTS.length = 0;
+  const { session, executed } = await openSession(t, { validatingMemory: true });
+  await session.prompt('check my memory for x', []);
+  assert.equal(REQUESTS.length, 3, 'wrong call, corrected call, answer');
+  assert.equal(
+    executed.filter((name) => name === 'memory').length,
+    1,
+    'only the valid call executed',
+  );
+  // The corrective error reached the model as the tool result of the bad call.
+  const afterError = JSON.stringify(REQUESTS[1].messages.at(-1));
+  assert.match(afterError, /Invalid memory arguments/);
+  await session.dispose();
+});
+
+test('a model that guesses an unknown tool name is sent to discovery, not executed', async (t) => {
+  responders = [
+    callReply('nod_tool', { name: 'emails', args: {} }, 'call_bad'),
+    callReply('nod_tool_search', { query: 'email' }, 'call_s'),
+    textReply('done'),
+  ];
+  callIndex = 0;
+  REQUESTS.length = 0;
+  const { session, executed } = await openSession(t);
+  await session.prompt('read my latest email', []);
+  assert.ok(!executed.includes('emails'), 'an unknown name never executes');
+  const afterError = JSON.stringify(REQUESTS[1].messages.at(-1));
+  assert.match(afterError, /nod_tool_search/);
+  await session.dispose();
+});
+
+test('minimal loadout declares five tools and reaches sandbox tools through the gateway', async (t) => {
+  process.env.NOD_TOOL_LOADOUT = 'minimal';
+  t.after(() => delete process.env.NOD_TOOL_LOADOUT);
+  responders = [
+    callReply('nod_tool', { name: 'bash', args: { command: 'echo ok' } }, 'call_b'),
+    textReply('done'),
+  ];
+  callIndex = 0;
+  REQUESTS.length = 0;
+  const { session } = await openSession(t);
+  await session.prompt('run a quick command', []);
+  assert.deepEqual(
+    [...declared(0)].sort(),
+    ['ask_user', 'codemode', 'nod_tool', 'nod_tool_search', 'send_message'],
+    `minimal declared set changed: ${declared(0).join(',')}`,
+  );
+  assert.equal(REQUESTS.length, 2, 'gateway call + answer');
+  const resultMessage = JSON.stringify(REQUESTS[1].messages.at(-1));
+  assert.match(resultMessage, /"role":"tool"/, 'a tool result came back');
+  assert.doesNotMatch(resultMessage, /isError|Invalid|not one/, 'the sandbox call succeeded');
   await session.dispose();
 });
