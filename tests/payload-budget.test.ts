@@ -9,6 +9,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {
+  learnRequestQuota,
+  knownRequestQuota,
+  quotaPreflightError,
+  QUOTA_TTL_MS,
+} from '../src/providers/pi/request-quota.ts';
 
 const REQUESTS: any[] = [];
 let responders: Array<() => Response> = [];
@@ -269,4 +275,35 @@ test('an unknown quota is not guessed: requests proceed without a learned limit'
   await session.prompt('hi', []);
   assert.equal(REQUESTS.length, 1, 'with no learned quota the request is sent');
   await session.dispose();
+});
+
+test('a learned limit updates in both directions and expires so it cannot lock a connection', () => {
+  const key = `quota-${randomUUID()}`;
+  const at = 1_000_000;
+  // Learn a strict limit, then a higher one (tier upgrade): newest report wins.
+  learnRequestQuota(key, 'Request too large for model `qwen-x` on tokens per minute (ITPM): Limit 7000, Requested 15463', at);
+  assert.equal(knownRequestQuota(key, at)?.limit, 7000);
+  learnRequestQuota(key, 'Request too large for model `qwen-x` on tokens per minute (ITPM): Limit 12000, Requested 15463', at + 1000);
+  assert.equal(knownRequestQuota(key, at + 1000)?.limit, 12000);
+  // And a stricter one (plan downgrade): newest wins downward too.
+  learnRequestQuota(key, 'Request too large for model `qwen-x` on tokens per minute (ITPM): Limit 5000, Requested 15463', at + 2000);
+  assert.equal(knownRequestQuota(key, at + 2000)?.limit, 5000);
+  // After the TTL the learned limit expires: the next request proceeds and
+  // either succeeds or re-learns the current limit from the provider.
+  assert.equal(knownRequestQuota(key, at + 2000 + QUOTA_TTL_MS), undefined);
+});
+
+test('the preflight refusal states the estimate basis and the re-check path', () => {
+  const key = `quota-${randomUUID()}`;
+  const at = 1_000_000;
+  learnRequestQuota(key, 'Request too large for model `qwen-x` on tokens per minute (ITPM): Limit 100, Requested 15463', at);
+  const error = quotaPreflightError(
+    key,
+    { messages: [{ role: 'user', content: 'x'.repeat(10_000), timestamp: 0 }] } as never,
+    at + 60_000,
+  );
+  assert.ok(error);
+  assert.match(error!.message, /estimate/i);
+  assert.match(error!.message, /100/);
+  assert.match(error!.message, /re-checked/i);
 });
