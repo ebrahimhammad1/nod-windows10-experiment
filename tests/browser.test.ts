@@ -8533,6 +8533,14 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
         assert.equal(document.querySelector('.thinking')?.textContent?.includes('Working…'), true);
         await settle(() => document.querySelector('.effort-picker-toggle'));
         assert.equal(document.querySelector('.effort-picker-toggle')?.getAttribute('aria-label'), 'Thinking level: High');
+        await act(async () => {
+          const toggle = document.querySelector('.effort-picker-toggle');
+          toggle.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }));
+          toggle.click();
+        });
+        await settle(() => document.querySelectorAll('[role="menuitemradio"]').length === 3);
+        assert.deepEqual([...document.querySelectorAll('[role="menuitemradio"]')].map(item => item.textContent.trim()), ['Off', 'Low', 'High']);
+        assert.equal(document.querySelector('[role="menuitemradio"][aria-checked="true"]')?.textContent.trim(), 'High');
         const stop = document.querySelector('[aria-label="Stop all work"]');
         assert.ok(stop && !stop.disabled);
         await act(async () => stop.click());

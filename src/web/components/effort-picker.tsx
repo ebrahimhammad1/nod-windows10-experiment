@@ -7,7 +7,6 @@ import { pageDataCache } from '../lib/page-data-cache';
 import type { ModelsResponse } from '../../shared/models';
 import { ActionMenu, ActionMenuItem } from './action-menu';
 import { Button } from './ui';
-import { Tooltip } from './tooltip';
 
 const effortNames: Record<ModelEffort, string> = {
   off: 'Off',
@@ -56,19 +55,16 @@ export function EffortPicker() {
       side="top"
       disabled={models.busy || saving}
       trigger={
-        <Tooltip
-          content={error || `Thinking level: ${effortNames[selection.effort] ?? selection.effort}`}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="effort-picker-toggle"
+          disabled={models.busy || saving}
+          title={error || `Thinking level: ${effortNames[selection.effort] ?? selection.effort}`}
+          aria-label={`Thinking level: ${effortNames[selection.effort] ?? selection.effort}`}
         >
-          <Button
-            variant="ghost"
-            size="icon"
-            className="effort-picker-toggle"
-            disabled={models.busy || saving}
-            aria-label={`Thinking level: ${effortNames[selection.effort] ?? selection.effort}`}
-          >
-            <Brain size={16} aria-hidden="true" />
-          </Button>
-        </Tooltip>
+          <Brain size={16} aria-hidden="true" />
+        </Button>
       }
     >
       {(close) =>
