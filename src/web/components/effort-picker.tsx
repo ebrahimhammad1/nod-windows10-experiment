@@ -57,9 +57,7 @@ export function EffortPicker() {
       disabled={models.busy || saving}
       trigger={
         <Tooltip
-          content={
-            error || `Thinking level: ${effortNames[selection.effort] ?? selection.effort}`
-          }
+          content={error || `Thinking level: ${effortNames[selection.effort] ?? selection.effort}`}
         >
           <Button
             variant="ghost"

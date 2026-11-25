@@ -102,6 +102,7 @@ interface ComposerProps {
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
   {
     active = true,
+    accessory,
     ready,
     busy = false,
     text,
@@ -348,8 +349,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [active]);
   useEffect(() => {
     if (active && recorder.phase === 'recording') sendButton.current?.focus();
-  }, [accessory,
-    active, recorder.phase]);
+  }, [active, recorder.phase]);
   useEffect(() => {
     if (
       !active ||
