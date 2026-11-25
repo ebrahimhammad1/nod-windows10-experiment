@@ -826,7 +826,11 @@ export function createPiAgent(options: {
         transport: 'sse',
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
-        retry: { baseDelayMs: 4000, ...(backups.length ? { maxRetries: 1 } : {}) },
+        // Bounded retry for transient provider failures (e.g. 429 rate
+        // limits): one retry with a base delay, whether or not backup
+        // models are configured, so a shared-pool throttle doesn't fail
+        // the turn immediately.
+        retry: { baseDelayMs: 4000, maxRetries: 1 },
       });
       const extensionLoader = new DefaultResourceLoader({
         cwd: input.workspace.path,
