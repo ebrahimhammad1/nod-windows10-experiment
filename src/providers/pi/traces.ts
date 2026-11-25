@@ -59,7 +59,8 @@ function errorType(error: string, phase?: ModelRequestFacts['requestPhase']) {
   )
     return 'auth';
   if (quota?.kind === 'credits_depleted') return 'billing';
-  if (quota) return 'quota';
+  if (quota && quota.kind !== 'rate_limited') return 'quota';
+  if (quota?.kind === 'rate_limited') return 'rate_limit';
   if (
     /positive balance|insufficient[_ -](?:credits?|funds|balance)|credit balance.*(?:low|exhausted|insufficient)|billing[_ -](?:hard[_ -]limit[_ -](?:reached|exceeded)|not[_ -]active)|billing (?:is )?(?:disabled|inactive)|payment required|requires more credits|(?:exhausted|insufficient|out of|not enough).*(?:credits?|funds)/i.test(
       error,

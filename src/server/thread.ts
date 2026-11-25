@@ -1451,6 +1451,16 @@ function modelRecoveryAdvice(text: string) {
     return 'This account has no prepayment credits. Add credits with the provider or choose another connection.';
   if (quota?.kind === 'zero_quota')
     return 'This account has no quota for this model. Check its access or choose another model.';
+  if (quota?.kind === 'rate_limited') {
+    const seconds = (quota.retryAfterMs ?? 0) / 1000;
+    const hint =
+      seconds >= 60
+        ? ` Its suggested retry delay is about ${Math.ceil(seconds / 60)} minute${Math.ceil(seconds / 60) === 1 ? '' : 's'}.`
+        : seconds > 0
+          ? ` Its suggested retry delay is about ${Math.ceil(seconds)} seconds.`
+          : '';
+    return `The provider is rate-limiting requests right now.${hint} Retry in a moment, or choose another model or connection.`;
+  }
   const oversized = text.match(
     /\brequest too large\b.{0,250}?\btokens per minute\s*\(TPM\):\s*Limit\s+(\d{1,9}),\s*Requested\s+(\d{1,9})/is,
   );

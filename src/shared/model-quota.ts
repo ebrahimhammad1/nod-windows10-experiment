@@ -9,8 +9,7 @@ export function modelQuotaFailure(text: string) {
           normalized,
         )
       ? ('daily_quota' as const)
-      : undefined;
-  if (!kind) return;
+      : ('rate_limited' as const);
   const retry = /\bretryDelay:\s*(\d+(?:\.\d+)?)s\b/i.exec(normalized);
   const delay = retry ? Number(retry[1]) * 1000 : 0;
   return {
