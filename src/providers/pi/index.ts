@@ -729,6 +729,13 @@ export function createPiAgent(options: {
         );
       if (input.newRequest && cold) startRequest(manager);
       const sandboxTools = input.restricted ? [] : createSandbox(input.workspace, input.timeZone);
+      // Local-review minimal loadout (NOD_TOOL_LOADOUT=minimal): only
+      // send_message, ask_user, nod_tool and nod_tool_search are declared;
+      // every other capability (sandbox tools included) stays reachable
+      // through the nod_tool gateway, which dispatches to the same mapped
+      // definitions with their validation and execution paths unchanged.
+      const minimalLoadout =
+        process.env.NOD_TOOL_LOADOUT === 'minimal' && !input.restricted && !budget.compact;
       const compactTools = [
         ...sandboxTools.map((tool) => tool.name),
         'nod_tool_search',
@@ -739,6 +746,15 @@ export function createPiAgent(options: {
       const tools: ToolDefinition[] = [
         ...sandboxTools.map((definition): ToolDefinition => ({
           ...definition,
+          ...(minimalLoadout
+            ? {
+                exposure: 'deferred' as const,
+                namespace: {
+                  name: 'workspace',
+                  description: 'Workspace file and command tools.',
+                },
+              }
+            : {}),
           execute: async (id, params, signal, onUpdate, context) => {
             params = structuredClone(params);
             const result = await input.runTool(
@@ -783,7 +799,10 @@ export function createPiAgent(options: {
             : tool.deferred
               ? toolSchema(tool.parameters)
               : tool.parameters) as ToolDefinition['parameters'],
-          ...((!input.restricted && !tool.eager) || tool.deferred || budget.compact
+          ...((!input.restricted && !tool.eager) ||
+          tool.deferred ||
+          budget.compact ||
+          (minimalLoadout && !['send_message', 'ask_user'].includes(tool.name))
             ? {
                 exposure: 'deferred' as const,
                 namespace: tool.deferred
