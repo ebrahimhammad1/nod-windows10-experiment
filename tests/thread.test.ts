@@ -11201,6 +11201,122 @@ test(
           }
         },
       );
+      await t.test(
+        'a turn whose tool already ran is never executed again after a retryable model failure',
+        async () => {
+          const original = dependencies.runTurn;
+          const prompt = `side-effect-replay ${randomUUID()}`;
+          let runs = 0;
+          let sideEffects = 0;
+          try {
+            dependencies.runTurn = async (context) => {
+              if (context.prompt !== prompt) return original!(context);
+              runs++;
+              await context.emit('tool_start', 'bash');
+              sideEffects++;
+              await context.emit('tool_complete', 'bash');
+              throw new ModelRequestError('429 Too Many Requests');
+            };
+            const sent = await thread.submitUserMessage(prompt);
+            await waitFor(settled(sent.turnId));
+            assert.equal(await turnStatus(sent.turnId), 'failed');
+            await delay(1500);
+            assert.equal(runs, 1, 'the turn ran once');
+            assert.equal(sideEffects, 1, 'the outside action ran once');
+            assert.equal(await turnStatus(sent.turnId), 'failed');
+          } finally {
+            dependencies.runTurn = original;
+          }
+        },
+      );
+      await t.test(
+        'the receipt is committed before the real tool dispatch runs, and a later failure ends the turn visibly',
+        async () => {
+          const original = dependencies.runTurn;
+          try {
+            for (const failing of [false, true]) {
+              const prompt = `ack-order ${failing ? 'failure' : 'success'} ${randomUUID()}`;
+              let turnId = '';
+              let toolResult = '';
+              const seen: Array<{ ackBeforeDispatch: boolean; finalBeforeDispatch: boolean }> = [];
+              const runtime = createAgentRuntime({
+                workspace: fakeWorkspace(),
+                computer: fakeComputer({
+                  act: async () => {
+                    const rows = (
+                      await db.pool.query(
+                        "SELECT stream_id,text FROM messages WHERE turn_id=$1 AND role='assistant'",
+                        [turnId],
+                      )
+                    ).rows;
+                    seen.push({
+                      ackBeforeDispatch: rows.some(
+                        (row) => String(row.stream_id) === `ack:${turnId}`,
+                      ),
+                      finalBeforeDispatch: rows.some((row) => row.text === `done: ${prompt}`),
+                    });
+                    return { text: 'Fixture page', url: 'https://example.com' };
+                  },
+                }),
+                agent: {
+                  open: async (input) => ({
+                    resumed: false,
+                    async prompt() {
+                      const opened = await input.tools
+                        .find((tool) => tool.name === 'browser')!
+                        .execute({ action: 'open', url: 'https://example.com/' })
+                        .catch((error: unknown) => `threw: ${String(error)}`);
+                      toolResult = JSON.stringify(opened).slice(0, 300);
+                      if (failing) throw new ModelRequestError('429 Too Many Requests');
+                      await input.tools
+                        .find((tool) => tool.name === 'send_message')!
+                        .execute({ text: `done: ${prompt}`, intent: 'final' });
+                    },
+                    abort() {},
+                    dispose() {},
+                  }),
+                  dispose() {},
+                },
+              });
+              dependencies.runTurn = (context) => {
+                if (context.prompt !== prompt) return original!(context);
+                turnId = context.turnId;
+                return runtime.runTurn(context);
+              };
+              const sent = await thread.submitUserMessage(prompt);
+              await waitFor(settled(sent.turnId));
+              assert.equal(seen.length, 1, `the tool was dispatched once: ${toolResult}`);
+              assert.equal(
+                seen[0].ackBeforeDispatch,
+                true,
+                'receipt was already stored when the tool dispatched',
+              );
+              assert.equal(seen[0].finalBeforeDispatch, false);
+              const rows = (
+                await db.pool.query(
+                  "SELECT stream_id,text FROM messages WHERE turn_id=$1 AND role='assistant' ORDER BY created_at,id",
+                  [sent.turnId],
+                )
+              ).rows;
+              assert.equal(rows[0].stream_id, `ack:${sent.turnId}`);
+              assert.equal(
+                rows.filter((row) => String(row.stream_id).startsWith('ack:')).length,
+                1,
+              );
+              assert.equal(await turnStatus(sent.turnId), failing ? 'failed' : 'succeeded');
+              if (failing) {
+                assert.ok(
+                  rows.length >= 2,
+                  'the failed turn shows a terminal message after the receipt',
+                );
+                assert.doesNotMatch(rows.at(-1)!.text, /^done:/);
+              } else assert.equal(rows.at(-1)!.text, `done: ${prompt}`);
+            }
+          } finally {
+            dependencies.runTurn = original;
+          }
+        },
+      );
       await t.test('retired confirmations stay out of later agent context', async () => {
         const activeId = (await thread.activeThread(db.pool)).id;
         const visibleId = randomUUID();
@@ -11309,14 +11425,33 @@ test(
                     type: 'tokens',
                     code: 'rate_limit_exceeded',
                     message:
-                      'Request too large for fixture-model on tokens per minute (TPM): Limit 6000, Requested 12000; please reduce your message size.',
+                      'Request too large for fixture-model on tokens per minute (TPM): Limit 6000, Requested 7000; please reduce your message size.',
                     detail: 'synthetic-private-provider-detail',
                   },
                 }),
-              reason: /Request too large.*Limit 6000, Requested 12000/,
+              reason: /Request too large.*Limit 6000, Requested 7000/,
               code: /rate_limit_exceeded/,
               advice:
                 /Shorten the conversation or choose a model with a higher tokens-per-minute limit\./,
+            },
+            {
+              prompt: 'model-oversized-itpm-fixture',
+              error:
+                prefix +
+                '413 ' +
+                JSON.stringify({
+                  error: {
+                    type: 'tokens',
+                    code: 'rate_limit_exceeded',
+                    message:
+                      'Request too large for fixture-model on input tokens per minute (ITPM): Limit 7000, Requested 15463; please reduce your message size.',
+                    detail: 'synthetic-private-provider-detail',
+                  },
+                }),
+              reason: /Request too large.*Limit 7000, Requested 15463/,
+              code: /rate_limit_exceeded/,
+              advice:
+                /limit of 7,000 tokens per minute .* needs 15,463.* even a short message exceeds it/,
             },
             {
               prompt: 'model-daily-quota-fixture',
