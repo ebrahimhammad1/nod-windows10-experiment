@@ -270,7 +270,13 @@ export function createHistorySearch({
          FROM messages m WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}),
        picked AS (SELECT t.n,ids.place,t.id FROM unnest($2::uuid[]) WITH ORDINALITY ids(id,place) JOIN thread t ON t.id=ids.id),
        shown AS (
-         SELECT t.*,bool_or(p.id=t.id) AS match,min(p.place) AS place FROM thread t
+         -- A row that is itself a match keeps its OWN rank place; only pure
+         -- context rows inherit the best covering match's place. Without this
+         -- min(p.place) lets an earlier-in-time match steal the rank of a
+         -- better-ranked neighbour whose context window covers it, swapping
+         -- the displayed order of matches.
+         SELECT t.*,bool_or(p.id=t.id) AS match,
+           coalesce(max(CASE WHEN p.id=t.id THEN p.place END),min(p.place)) AS place FROM thread t
          JOIN picked p ON t.n BETWEEN p.n-$3 AND p.n+$3 GROUP BY t.id,t.owner_id,t.role,t.text,t.turn_id,t.created_at,t.n)
        SELECT s.id,s.role,CASE WHEN length(s.text)<=1200 THEN s.text
          ELSE ts_headline('simple',s.text,terms.q,'StartSel="",StopSel="",MaxWords=60,MinWords=20,MaxFragments=3,FragmentDelimiter=" … "') END AS text,
