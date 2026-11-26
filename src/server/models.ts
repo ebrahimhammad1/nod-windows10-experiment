@@ -457,6 +457,7 @@ export function createModelService(options: {
       const value = row.managed ? options.bootstrap?.credentials[row.provider] : saved;
       const tag = credentialTag(value);
       const failed = failures(row, tag).sort(([, a], [, b]) => b.retryAt - a.retryAt);
+      const credentialWide = failed.filter(([, item]) => item.scope !== 'model');
       return {
         ...row,
         credentialTag: tag,
@@ -469,7 +470,9 @@ export function createModelService(options: {
           : {}),
         ...(failed.length
           ? {
-              issue: { reason: failed[0]![1].reason },
+              ...(credentialWide.length
+                ? { issue: { reason: credentialWide[0]![1].reason } }
+                : {}),
               issues: Object.fromEntries(failed.map(([id, item]) => [id, { reason: item.reason }])),
               retry: Object.fromEntries(failed.map(([id, item]) => [id, item.retryAt])),
             }
@@ -588,6 +591,11 @@ export function createModelService(options: {
               saved.requestFailures[modelId] = {
                 credentialTag: tag,
                 failures: count,
+                // A rejected key or empty credits fails EVERY model on the
+                // connection, so it stays on the card after a model switch;
+                // anything else (per-model plan availability, outages)
+                // belongs to that model only.
+                scope: status === 401 || status === 402 ? 'connection' : 'model',
                 retryAt: Date.now() + failureWindow(count),
                 reason: redactSecretText(modelFailureReason(error))
                   .replace(/\s*\[request phase: [^\]]*\]\s*$/, '')
@@ -1491,7 +1499,7 @@ export function createModelService(options: {
                     connectionId: id,
                     modelId: selection.modelId,
                   });
-                  return selectedIssue ? { issue: selectedIssue } : {};
+                  return selectedIssue ? { issue: selectedIssue } : issue ? { issue } : {};
                 })()
               : issue
                 ? { issue }
