@@ -43,6 +43,10 @@ export function createHistorySearch({
 }) {
   const kept = (alias: string) =>
     standing ? ` AND NOT (${alias}.role='user' AND ${withdrawnSql(alias)})` : '';
+  // Execution-ack receipts are chat UI, not conversation: retrieval must not
+  // return them, or a model quotes the receipt as if it were the reply.
+  const notReceipt = (alias: string) =>
+    ` AND (${alias}.stream_id IS NULL OR ${alias}.stream_id NOT LIKE 'ack:%')`;
   return async function search(raw: unknown) {
     const { query, before, cursor, from, to, around, order, offset } = inputSchema.parse(raw);
     if (around) {
@@ -60,13 +64,13 @@ export function createHistorySearch({
            SELECT m.created_at,m.id FROM messages m WHERE m.id=$2 AND m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}
            UNION ALL
            (SELECT m.created_at,m.id FROM turns u JOIN messages m ON m.turn_id=u.id AND m.owner_id=u.owner_id AND m.thread_id=u.thread_id
-            WHERE u.id=$2 AND u.owner_id=$1 AND ${activeThreadSql('u')} AND m.hidden_at IS NULL
+            WHERE u.id=$2 AND u.owner_id=$1 AND ${activeThreadSql('u')} AND m.hidden_at IS NULL${notReceipt('m')}
             ORDER BY m.created_at,m.id LIMIT 1)),
          hit AS (SELECT created_at,id FROM target LIMIT 1),
          nearby AS (
-           (SELECT m.* FROM messages m,hit WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')} AND (m.created_at,m.id)<(hit.created_at,hit.id) ORDER BY m.created_at DESC,m.id DESC LIMIT 5)
+           (SELECT m.* FROM messages m,hit WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}${notReceipt('m')} AND (m.created_at,m.id)<(hit.created_at,hit.id) ORDER BY m.created_at DESC,m.id DESC LIMIT 5)
            UNION ALL (SELECT m.* FROM messages m,hit WHERE m.id=hit.id)
-           UNION ALL (SELECT m.* FROM messages m,hit WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')} AND (m.created_at,m.id)>(hit.created_at,hit.id) ORDER BY m.created_at,m.id LIMIT 5))
+           UNION ALL (SELECT m.* FROM messages m,hit WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}${notReceipt('m')} AND (m.created_at,m.id)>(hit.created_at,hit.id) ORDER BY m.created_at,m.id LIMIT 5))
          SELECT id,role,CASE WHEN id=(SELECT id FROM hit) THEN substring(text from $3+1 for ${TARGET_CHARS}) ELSE left(text,${CONTEXT_CHARS}) END AS text,
            CASE WHEN id=(SELECT id FROM hit) THEN length(text)>$3+${TARGET_CHARS} ELSE length(text)>${CONTEXT_CHARS} END AS shortened,
            turn_id,created_at,
@@ -159,10 +163,10 @@ export function createHistorySearch({
        docs AS (
          SELECT m.id,m.owner_id,m.turn_id,m.role,m.text,m.created_at,to_tsvector('simple',m.text) AS v
          FROM messages m CROSS JOIN terms
-         WHERE ${scope('m')} AND m.hidden_at IS NULL${kept('m')}
+         WHERE ${scope('m')} AND m.hidden_at IS NULL${kept('m')}${notReceipt('m')}
            AND ($2::text IS NULL OR to_tsvector('simple',m.text) @@ terms.q)),
        corpus_count AS (
-         SELECT count(*) AS n FROM messages m CROSS JOIN terms WHERE ${scope('m')} AND m.hidden_at IS NULL),
+         SELECT count(*) AS n FROM messages m CROSS JOIN terms WHERE ${scope('m')} AND m.hidden_at IS NULL${notReceipt('m')}),
        weights AS (
          SELECT w,ln(1+((SELECT n FROM corpus_count)-count(*)+0.5)/(count(*)+0.5)) AS idf
          FROM (SELECT DISTINCT lexeme AS w FROM unnest(tsvector_to_array(to_tsvector('simple',coalesce($2,'')))) lexeme) words
@@ -226,7 +230,7 @@ export function createHistorySearch({
       );
       page = await pool.query<HistoryMessage & { place: string; total: number }>(
         `WITH z AS (SELECT coalesce((SELECT time_zone FROM preferences WHERE owner_id=$1),'UTC') AS zone),
-         corpus AS MATERIALIZED (SELECT m.* FROM messages m CROSS JOIN z WHERE ${fscope('m')} AND m.hidden_at IS NULL),
+         corpus AS MATERIALIZED (SELECT m.* FROM messages m CROSS JOIN z WHERE ${fscope('m')} AND m.hidden_at IS NULL${notReceipt('m')}),
          terms AS (SELECT t.term FROM unnest($2::text[]) AS t(term)),
          weights AS MATERIALIZED (
            SELECT terms.term,ln(1+((SELECT count(*) FROM corpus)-count(*)+0.5)/(count(*)+0.5)) AS idf
@@ -247,7 +251,7 @@ export function createHistorySearch({
     }
     if (cursor && !page.rows.length && !usedFallback) {
       const { rows } = await pool.query(
-        `${terms} SELECT m.id FROM messages m CROSS JOIN terms WHERE ${where('m', 'm.text')} AND m.hidden_at IS NULL${kept('m')} AND m.id=$7::uuid`,
+        `${terms} SELECT m.id FROM messages m CROSS JOIN terms WHERE ${where('m', 'm.text')} AND m.hidden_at IS NULL${kept('m')}${notReceipt('m')} AND m.id=$7::uuid`,
         [...values, cursor],
       );
       if (!rows.length) throw new Error('This history cursor does not match the search.');
@@ -255,7 +259,7 @@ export function createHistorySearch({
     if (cursor && !page.rows.length && usedFallback) {
       const { rows } = await pool.query(
         `SELECT m.id FROM messages m
-         WHERE m.id=$3::uuid AND m.owner_id=$1 AND ${activeThreadSql('m')} AND m.hidden_at IS NULL
+         WHERE m.id=$3::uuid AND m.owner_id=$1 AND ${activeThreadSql('m')} AND m.hidden_at IS NULL${notReceipt('m')}
            AND EXISTS (SELECT 1 FROM unnest($2::text[]) AS t(term) WHERE m.text ILIKE t.term ESCAPE '\')`,
         [ownerId, fallbackTerms, cursor],
       );
@@ -267,7 +271,7 @@ export function createHistorySearch({
       `WITH terms AS (SELECT replace(plainto_tsquery('simple',coalesce($4,''))::text,'&','|')::tsquery AS q),
        thread AS (
          SELECT m.id,m.owner_id,m.role,m.text,m.turn_id,m.created_at,row_number() OVER (ORDER BY m.created_at,m.id) AS n
-         FROM messages m WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}),
+         FROM messages m WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}${notReceipt('m')}),
        picked AS (SELECT t.n,ids.place,t.id FROM unnest($2::uuid[]) WITH ORDINALITY ids(id,place) JOIN thread t ON t.id=ids.id),
        shown AS (
          -- A row that is itself a match keeps its OWN rank place; only pure
