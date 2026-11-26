@@ -1755,9 +1755,16 @@ export function createPiAgent(options: {
                   const last = messages.findLast(
                     (message) => (message as { role?: string }).role === 'assistant',
                   );
-                  const reply = contentText(
-                    (last as { content?: unknown } | undefined)?.content as never,
-                  ).trim();
+                  const lastContent = (last as { content?: unknown } | undefined)?.content;
+                  if (process.env.NOD_BENCH_DEBUG)
+                    console.error(
+                      'zero-loop last message:',
+                      JSON.stringify(last)?.slice(0, 400),
+                    );
+                  const reply =
+                    typeof lastContent === 'string' || Array.isArray(lastContent)
+                      ? contentText(lastContent as never).trim()
+                      : '';
                   const command = zeroToolCommand(reply);
                   if (!command) break;
                   let result: unknown;
@@ -1775,10 +1782,11 @@ export function createPiAgent(options: {
                   } catch (error) {
                     result = { error: error instanceof Error ? error.message : String(error) };
                   }
+                  const resultContent = (result as { content?: unknown } | undefined)?.content;
                   const serialized =
-                    contentText((result as { content?: unknown } | undefined)?.content as never) ||
-                    JSON.stringify(result) ||
-                    'null';
+                    typeof resultContent === 'string' || Array.isArray(resultContent)
+                      ? contentText(resultContent as never)
+                      : (JSON.stringify(result) ?? 'null');
                   // Bounded like any tool result: an unbounded echo would
                   // re-inflate the very next request past the limit.
                   await session.prompt(

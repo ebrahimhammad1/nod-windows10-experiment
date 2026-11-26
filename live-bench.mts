@@ -40,11 +40,15 @@ const captures: any[] = [];
       }
     }
     const text = Buffer.concat(chunks).toString('utf8');
-    const usageMatches = [...text.matchAll(/"usage":(\{[^}]*\})/g)];
-    if (usageMatches.length) {
-      const u = JSON.parse(usageMatches.at(-1)![1]);
-      promptTokens = u.prompt_tokens;
-      completionTokens = u.completion_tokens;
+    for (const line of text.split('\n')) {
+      if (!line.startsWith('data: ') || line.includes('[DONE]')) continue;
+      try {
+        const d = JSON.parse(line.slice(6));
+        if (d.usage) {
+          promptTokens = d.usage.prompt_tokens;
+          completionTokens = d.usage.completion_tokens;
+        }
+      } catch {}
     }
     if (res.status !== 200) errorText = text.slice(0, 400);
     captures.push({
@@ -65,8 +69,9 @@ const captures: any[] = [];
   }
 };
 
-async function run(mode: 'CURRENT' | 'MINIMAL', promptText: string) {
+async function run(mode: 'CURRENT' | 'MINIMAL' | 'ZERO', promptText: string) {
   if (mode === 'MINIMAL') process.env.NOD_TOOL_LOADOUT = 'minimal';
+  else if (mode === 'ZERO') process.env.NOD_TOOL_LOADOUT = 'zero';
   else delete process.env.NOD_TOOL_LOADOUT;
   const sessionRoot = await mkdtemp(join(tmpdir(), 'nod-live-'));
   const workspace: any = {
@@ -126,12 +131,12 @@ async function run(mode: 'CURRENT' | 'MINIMAL', promptText: string) {
     await session.prompt(promptText, []);
     await session.dispose();
   } catch (e) {
-    outcome = `threw: ${String(e).slice(0, 200)}`;
+    outcome = `threw: ${String((e as any)?.stack ?? e).slice(0, 900)}`;
   }
   const wallMs = Math.round(performance.now() - t0);
   await agent.dispose();
   console.log(JSON.stringify({ mode, prompt: promptText.slice(0, 30), wallMs, outcome, calls: captures.slice(before) }));
 }
 
-const mode1 = (process.argv[2] ?? 'MINIMAL') as 'CURRENT' | 'MINIMAL';
+const mode1 = (process.argv[2] ?? 'MINIMAL') as 'CURRENT' | 'MINIMAL' | 'ZERO';
 await run(mode1, process.argv[3] ?? 'hi');
