@@ -1744,7 +1744,9 @@ export function createModelService(options: {
               ? {
                   ...analyticsModel(provider, selection.modelId),
                   provider,
-                  effort: selection.effort,
+                  // the analytics event only accepts concrete effort levels;
+                  // the stored 'auto' mode is omitted rather than resolved
+                  ...(selection.effort === 'auto' ? {} : { effort: selection.effort }),
                 }
               : {}),
           },

@@ -9799,7 +9799,9 @@ test('each session opens on its work model and the observer starts fresh after a
         provider: 'openai',
         method: 'api_key',
         definition: catalog.find((item) => item.choice.id === (choice?.modelId ?? 'gpt-6.1-sol'))!,
-        effort: choice?.effort ?? 'high',
+        // ModelAccess carries a concrete level; the stored 'auto' mode would
+        // be resolved by the request layer, so the fixture maps it.
+        effort: choice?.effort && choice.effort !== 'auto' ? choice.effort : 'high',
         read: async () => ({ type: 'api_key', key: 'fixture-openai-key' }),
       };
     },

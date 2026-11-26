@@ -13,9 +13,22 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import type {
+  Api,
+  AssistantMessage,
+  AssistantMessageEvent,
+  AssistantMessageEventStream,
+  Context,
+  Model,
+} from '@earendil-works/pi-ai';
+import type { ModelAccess } from '../src/ports/models.ts';
+import type { createPiModelRuntime } from '../src/providers/pi/models.ts';
 import { createTurnFallback } from '../src/providers/pi/fallback.ts';
 
-function makeAccess(id, contextWindow = 100_000) {
+type Connection = Awaited<ReturnType<typeof createPiModelRuntime>>;
+type Spy = { connected: string[]; switched: number[]; moved: [number, number][]; failed: AssistantMessage[] };
+
+function makeAccess(id: string, contextWindow = 100_000): ModelAccess {
   return {
     provider: 'openrouter',
     method: 'http',
@@ -24,10 +37,10 @@ function makeAccess(id, contextWindow = 100_000) {
     textModel: undefined,
     prepareRequest: undefined,
     definition: { choice: { id, name: `Model ${id}`, contextWindow, images: true } },
-  };
+  } as unknown as ModelAccess;
 }
 
-function failedMessage(id, errorMessage) {
+function failedMessage(id: string, errorMessage?: string): AssistantMessage {
   return {
     role: 'assistant',
     content: [],
@@ -45,27 +58,45 @@ function failedMessage(id, errorMessage) {
     stopReason: 'error',
     errorMessage,
     timestamp: Date.now(),
-  };
+  } as unknown as AssistantMessage;
 }
 
-function okMessage(id) {
+function okMessage(id: string): AssistantMessage {
   return { ...failedMessage(id, undefined), stopReason: 'stop', errorMessage: undefined };
 }
 
-function stubConnection(id) {
-  return { model: { api: 'openrouter', provider: 'openrouter', id }, requestFacts: () => undefined };
+function stubConnection(id: string): Connection {
+  return {
+    model: { api: 'openrouter', provider: 'openrouter', id },
+    requestFacts: () => undefined,
+  } as unknown as Connection;
 }
 
-function stubStream(events, result) {
+function stubStream(
+  events: AssistantMessageEvent[],
+  result: AssistantMessage,
+): AssistantMessageEventStream {
   return {
     async *[Symbol.asyncIterator]() {
       for (const event of events) yield event;
     },
     result: async () => result,
-  };
+  } as unknown as AssistantMessageEventStream;
 }
 
-function makeFallback({ primaryEvents, primaryResult, backups = [], retrying = () => false, spy }) {
+function makeFallback({
+  primaryEvents,
+  primaryResult,
+  backups = [],
+  retrying = () => false,
+  spy,
+}: {
+  primaryEvents: AssistantMessageEvent[];
+  primaryResult: AssistantMessage;
+  backups?: ModelAccess[];
+  retrying?: () => boolean;
+  spy: Spy;
+}) {
   const primaryAccess = makeAccess('primary');
   const primaryConnection = stubConnection('primary');
   return createTurnFallback({
@@ -77,18 +108,18 @@ function makeFallback({ primaryEvents, primaryResult, backups = [], retrying = (
     backups,
     start: 0,
     automatic: false,
-    connect: (access) => {
+    connect: (access: ModelAccess) => {
       spy.connected.push(access.definition.choice.id);
       return Promise.resolve({
         ...stubConnection(access.definition.choice.id),
         runtime: {
           streamSimple: () =>
             stubStream(
-              [{ type: 'text_delta', delta: 'answer' }],
+              [{ type: 'text_delta', delta: 'answer' } as AssistantMessageEvent],
               okMessage(access.definition.choice.id),
             ),
         },
-      });
+      } as unknown as Connection);
     },
     retrying,
     shared: () => 0,
@@ -99,20 +130,23 @@ function makeFallback({ primaryEvents, primaryResult, backups = [], retrying = (
 }
 
 const RETRYABLE_429 = 'HTTP 429 too many requests (rate limit)';
-const CONTEXT = { messages: [], systemPrompt: undefined };
+const CONTEXT = { messages: [], systemPrompt: undefined } as unknown as Context;
 
 test('retryable 429 during an available retry surfaces without touching backups', async () => {
-  const spy = { connected: [], switched: [], moved: [], failed: [] };
+  const spy: Spy = { connected: [], switched: [], moved: [], failed: [] };
   const error = failedMessage('primary', RETRYABLE_429);
   const fallback = makeFallback({
-    primaryEvents: [{ type: 'start' }, { type: 'error', reason: 'error', error }],
+    primaryEvents: [
+      { type: 'start' },
+      { type: 'error', reason: 'error', error },
+    ] as AssistantMessageEvent[],
     primaryResult: error,
     backups: [makeAccess('backup')],
     retrying: () => true,
     spy,
   });
   const stream = fallback.stream(primaryTarget(), CONTEXT, undefined);
-  const events = [];
+  const events: AssistantMessageEvent[] = [];
   for await (const event of stream) events.push(event);
   const result = await stream.result();
   assert.equal(result.stopReason, 'error');
@@ -121,17 +155,20 @@ test('retryable 429 during an available retry surfaces without touching backups'
 });
 
 test('exhausted retries move to the backup before any answer content', async () => {
-  const spy = { connected: [], switched: [], moved: [], failed: [] };
+  const spy: Spy = { connected: [], switched: [], moved: [], failed: [] };
   const error = failedMessage('primary', RETRYABLE_429);
   const fallback = makeFallback({
-    primaryEvents: [{ type: 'start' }, { type: 'error', reason: 'error', error }],
+    primaryEvents: [
+      { type: 'start' },
+      { type: 'error', reason: 'error', error },
+    ] as AssistantMessageEvent[],
     primaryResult: error,
     backups: [makeAccess('backup')],
     retrying: () => false,
     spy,
   });
   const stream = fallback.stream(primaryTarget(), CONTEXT, undefined);
-  const events = [];
+  const events: AssistantMessageEvent[] = [];
   for await (const event of stream) events.push(event);
   const result = await stream.result();
   assert.equal(result.stopReason, 'stop');
@@ -142,21 +179,21 @@ test('exhausted retries move to the backup before any answer content', async () 
 });
 
 test('an error after answer content started never moves to a backup', async () => {
-  const spy = { connected: [], switched: [], moved: [], failed: [] };
+  const spy: Spy = { connected: [], switched: [], moved: [], failed: [] };
   const error = failedMessage('primary', RETRYABLE_429);
   const fallback = makeFallback({
     primaryEvents: [
       { type: 'start' },
       { type: 'text_delta', delta: 'partial answer' },
       { type: 'error', reason: 'error', error },
-    ],
+    ] as AssistantMessageEvent[],
     primaryResult: error,
     backups: [makeAccess('backup')],
     retrying: () => false,
     spy,
   });
   const stream = fallback.stream(primaryTarget(), CONTEXT, undefined);
-  const events = [];
+  const events: AssistantMessageEvent[] = [];
   for await (const event of stream) events.push(event);
   const result = await stream.result();
   assert.equal(result.stopReason, 'error');
@@ -165,10 +202,13 @@ test('an error after answer content started never moves to a backup', async () =
 });
 
 test('last candidate failure surfaces the error', async () => {
-  const spy = { connected: [], switched: [], moved: [], failed: [] };
+  const spy: Spy = { connected: [], switched: [], moved: [], failed: [] };
   const error = failedMessage('primary', RETRYABLE_429);
   const fallback = makeFallback({
-    primaryEvents: [{ type: 'start' }, { type: 'error', reason: 'error', error }],
+    primaryEvents: [
+      { type: 'start' },
+      { type: 'error', reason: 'error', error },
+    ] as AssistantMessageEvent[],
     primaryResult: error,
     backups: [],
     retrying: () => false,
@@ -181,6 +221,6 @@ test('last candidate failure surfaces the error', async () => {
   assert.equal(result.errorMessage, RETRYABLE_429);
 });
 
-function primaryTarget() {
-  return { api: 'openrouter', provider: 'openrouter', id: 'primary' };
+function primaryTarget(): Model<Api> {
+  return { api: 'openrouter', provider: 'openrouter', id: 'primary' } as unknown as Model<Api>;
 }

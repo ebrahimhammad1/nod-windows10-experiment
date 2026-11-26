@@ -41,7 +41,7 @@ test('non-string tool and non-object input are rejected', () => {
 });
 
 const tool = (name: string, exposure: 'direct' | 'deferred', description = ''): ToolDefinition =>
-  ({ name, label: name, description, parameters: { type: 'object' }, exposure }) as ToolDefinition;
+  ({ name, label: name, description, parameters: { type: 'object' }, exposure }) as unknown as ToolDefinition;
 
 test('the catalog ranks by query, caps at five and hides direct tools', () => {
   const tools = [

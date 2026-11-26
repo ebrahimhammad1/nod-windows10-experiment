@@ -11,7 +11,7 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { retryAssistantCall } from '@earendil-works/pi-ai';
+import { retryAssistantCall, type AssistantMessage } from '@earendil-works/pi-ai';
 
 import {
   RETRY_BASE_DELAY_MS,
@@ -22,7 +22,7 @@ import {
 
 const POLICY = { enabled: true, maxRetries: 1, baseDelayMs: 4000 };
 
-function message(stopReason, errorMessage) {
+function message(stopReason: string, errorMessage?: string): AssistantMessage {
   return {
     role: 'assistant',
     content: [],
@@ -40,12 +40,12 @@ function message(stopReason, errorMessage) {
     stopReason,
     errorMessage,
     timestamp: Date.now(),
-  };
+  } as unknown as AssistantMessage;
 }
 
 test('retryable 429 is retried exactly once with the configured backoff', async () => {
   let calls = 0;
-  const scheduled = [];
+  const scheduled: Array<{ attempt: number; max: number; delayMs: number }> = [];
   const result = await retryAssistantCall(
     async () => {
       calls++;
@@ -53,7 +53,9 @@ test('retryable 429 is retried exactly once with the configured backoff', async 
     },
     POLICY,
     undefined,
-    { onRetryScheduled: (attempt, max, delayMs) => scheduled.push({ attempt, max, delayMs }) },
+    { onRetryScheduled: (attempt, max, delayMs) => {
+        scheduled.push({ attempt, max, delayMs });
+      } },
   );
   assert.equal(result.stopReason, 'stop');
   assert.equal(calls, 2, 'one produce retry, bounded by maxRetries');
@@ -71,12 +73,14 @@ test('turn policy is one retry with a jittered 4-6s base delay', () => {
 });
 
 test('provider retry-after hint is honored and never shortened', async () => {
-  const scheduled = [];
+  const scheduled: Array<{ attempt: number; max: number; delayMs: number }> = [];
   const result = await retryAssistantCall(
     async () => message('error', 'HTTP 429 too many requests, retry after 12s'),
     { enabled: true, maxRetries: 1, baseDelayMs: 4000, maxAgentDelayMs: RETRY_MAX_DELAY_MS },
     undefined,
-    { onRetryScheduled: (attempt, max, delayMs) => scheduled.push({ attempt, max, delayMs }) },
+    { onRetryScheduled: (attempt, max, delayMs) => {
+        scheduled.push({ attempt, max, delayMs });
+      } },
   );
   assert.equal(result.stopReason, 'error');
   assert.deepEqual(scheduled, [{ attempt: 1, max: 1, delayMs: 12_000 }]);
@@ -84,7 +88,7 @@ test('provider retry-after hint is honored and never shortened', async () => {
 
 test('a provider hint beyond the cap fails fast instead of retrying early', async () => {
   let calls = 0;
-  const scheduled = [];
+  const scheduled: Array<{ attempt: number; max: number; delayMs: number }> = [];
   const result = await retryAssistantCall(
     async () => {
       calls++;
@@ -92,7 +96,9 @@ test('a provider hint beyond the cap fails fast instead of retrying early', asyn
     },
     { enabled: true, maxRetries: 1, baseDelayMs: 4000, maxAgentDelayMs: RETRY_MAX_DELAY_MS },
     undefined,
-    { onRetryScheduled: (attempt, max, delayMs) => scheduled.push({ attempt, max, delayMs }) },
+    { onRetryScheduled: (attempt, max, delayMs) => {
+        scheduled.push({ attempt, max, delayMs });
+      } },
   );
   assert.equal(result.stopReason, 'error');
   assert.equal(calls, 1, 'no retry earlier than the provider hint');
@@ -100,12 +106,14 @@ test('a provider hint beyond the cap fails fast instead of retrying early', asyn
 });
 
 test('computed delay is capped at the 30s maximum', async () => {
-  const scheduled = [];
+  const scheduled: Array<{ attempt: number; max: number; delayMs: number }> = [];
   await retryAssistantCall(
     async () => message('error', 'HTTP 429 too many requests'),
     { enabled: true, maxRetries: 1, baseDelayMs: 120_000, maxAgentDelayMs: RETRY_MAX_DELAY_MS },
     undefined,
-    { onRetryScheduled: (attempt, max, delayMs) => scheduled.push({ attempt, max, delayMs }) },
+    { onRetryScheduled: (attempt, max, delayMs) => {
+        scheduled.push({ attempt, max, delayMs });
+      } },
   );
   assert.deepEqual(scheduled, [{ attempt: 1, max: 1, delayMs: RETRY_MAX_DELAY_MS }]);
 });

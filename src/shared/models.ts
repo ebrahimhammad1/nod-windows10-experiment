@@ -76,6 +76,8 @@ export interface ModelChoice {
   textModelName?: string;
   contextWindow: number;
   pricing?: ModelPricing | 'variable';
+  // Per-model failure state, present on view() responses when recorded.
+  issue?: ModelIssue;
 }
 
 export interface ModelPricing {
@@ -255,6 +257,9 @@ export interface ModelIssue {
 export interface ModelsResponse {
   connections: ModelConnection[];
   selection: ModelSelection | null;
+  // Base level a stored 'auto' selection currently resolves to, exposed so
+  // the card/picker can name it; the request-time layer may adapt further.
+  resolvedEffort?: ModelEffort;
   selectionIssue?: ModelIssue;
   routes: ModelRoutes;
   backups: ModelSelection[];
