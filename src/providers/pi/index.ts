@@ -842,7 +842,11 @@ export function createPiAgent(options: {
           null,
           priorTokens,
         );
-      if (input.newRequest && cold) startRequest(manager);
+      // Mark every new owner request, not only cold-cache restarts: the
+      // earlierResults prune keys off this marker to age previous turns'
+      // oversize tool results out of the replayed transcript (originals stay
+      // in the session store and re-read through the source tools).
+      if (input.newRequest) startRequest(manager);
       const sandboxTools = input.restricted ? [] : createSandbox(input.workspace, input.timeZone);
       // Local-review minimal loadout (NOD_TOOL_LOADOUT=minimal): only
       // send_message, ask_user, nod_tool and nod_tool_search are declared;
