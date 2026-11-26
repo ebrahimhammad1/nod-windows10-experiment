@@ -36,7 +36,11 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { createPiModelRuntime } from './models.ts';
 import { createTurnFallback, modelKey } from './fallback.ts';
-import { learnRequestQuota, quotaPreflightError } from './request-quota.ts';
+import {
+  learnRequestQuota,
+  quotaPreflightError,
+  retryableRateLimitWait,
+} from './request-quota.ts';
 import { modelContext } from './context.ts';
 import { createContextOutput, toolOutputReference } from './context-output.ts';
 import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './audio.ts';
@@ -1275,18 +1279,36 @@ export function createPiAgent(options: {
           const refused = quotaPreflightError(quotaKey, context);
           if (refused) throw refused;
         }
-        let response;
-        try {
-          response = await stream(target, context, options);
-        } catch (error) {
-          if (!fallback && quotaKey)
-            learnRequestQuota(quotaKey, error instanceof Error ? error.message : String(error));
-          throw error;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          let response;
+          try {
+            response = await stream(target, context, options);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!fallback && quotaKey) learnRequestQuota(quotaKey, message);
+            // Per-minute pacing (429) is retryable at the provider's own hint;
+            // the session retry misclassifies these as billing limits, and
+            // per-request size rejections (413) carry no hint and never match.
+            // Retrying resends this request only; already-executed tool
+            // results stay in context and are not replayed.
+            const wait = retryableRateLimitWait(message);
+            if (wait === undefined || attempt === 1) throw error;
+            input.onEvent({ type: 'retry', model: target.id, attempt: attempt + 1, attempts: 2 });
+            await new Promise((resolve) => setTimeout(resolve, wait));
+            continue;
+          }
+          const result = await response.result();
+          if (!fallback && quotaKey) learnRequestQuota(quotaKey, result.errorMessage);
+          const wait = retryableRateLimitWait(result.errorMessage);
+          if (wait !== undefined && attempt < 1) {
+            input.onEvent({ type: 'retry', model: target.id, attempt: attempt + 1, attempts: 2 });
+            await new Promise((resolve) => setTimeout(resolve, wait));
+            continue;
+          }
+          if (compaction) compaction.requests.push(result);
+          return response;
         }
-        const result = await response.result();
-        if (!fallback && quotaKey) learnRequestQuota(quotaKey, result.errorMessage);
-        if (compaction) compaction.requests.push(result);
-        return response;
+        throw new Error('unreachable');
       };
 
       const finishTurn = session.agent.finishTurn;

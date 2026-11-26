@@ -109,3 +109,23 @@ export function quotaPreflightError(
   );
 }
 
+
+// A 429 "rate limit reached" rejection is per-minute pacing, not request
+// size, and Groq appends a billing upsell URL to every 429, which makes the
+// pi session retry classify it as a non-retryable billing limit (the
+// "billing" pattern in pi-ai's NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN).
+// So the session layer never retries these; the single-connection wrapper
+// below is the only place they can be retried. Honor the provider's own
+// "try again in N s" hint: never earlier than the hint, and a hint beyond
+// the cap fails clearly instead of being truncated.
+export const RATE_LIMIT_WAIT_CAP_MS = 30_000;
+export function retryableRateLimitWait(text: string | undefined): number | undefined {
+  if (!text || !/rate limit reached/i.test(text)) return undefined;
+  const match = text.match(/try again in\s+([\d.]+)\s*s/i);
+  if (!match) return undefined;
+  const seconds = Number(match[1]);
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined;
+  const ms = seconds * 1000;
+  if (ms > RATE_LIMIT_WAIT_CAP_MS) return undefined;
+  return ms;
+}

@@ -63,7 +63,7 @@ const groq429 = () => () =>
     JSON.stringify({
       error: {
         message:
-          'Rate limit reached for model `fixture-groq` in organization `fixture` on input tokens per minute (ITPM): Limit 7000, Used 3932, Requested 4074. Please try again in 8.61s.',
+          'Rate limit reached for model `fixture-groq` in organization `fixture` on input tokens per minute (ITPM): Limit 7000, Used 3932, Requested 4074. Please try again in 0.4s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing',
         type: 'tokens',
         code: 'rate_limit_exceeded',
       },
@@ -261,7 +261,7 @@ test('large tool results stay bounded as the conversation grows', async (t) => {
   await session.dispose();
 });
 
-test('a 429 per-minute rejection retries once after a paced delay, then completes', async (t) => {
+test('a 429 per-minute rejection retries at the provider hint even with the billing upsell text, then completes', async (t) => {
   responders = [groq429(), textReply('after the wait')];
   callIndex = 0;
   REQUESTS.length = 0;
@@ -270,10 +270,7 @@ test('a 429 per-minute rejection retries once after a paced delay, then complete
   await session.prompt('hi', []);
   const waited = Date.now() - started;
   assert.equal(REQUESTS.length, 2, 'the paced retry resends the same request once');
-  assert.ok(
-    waited >= 9_000,
-    `the retry must wait out the provider window, waited ${waited}ms`,
-  );
+  assert.ok(waited >= 400, `the retry must honor the provider hint, waited ${waited}ms`);
   assert.ok(
     events.some((event) => event.type === 'retry'),
     `the retry must be visible, got: ${JSON.stringify(events.map((e) => e.type))}`,
