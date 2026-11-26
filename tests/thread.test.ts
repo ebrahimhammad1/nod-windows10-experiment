@@ -8515,8 +8515,8 @@ test(
             '2019-09-01T10:00:00Z',
           );
           const prefixed = await add('تطورات بالطيران المدني هذا الأسبوع', '2019-09-02T10:00:00Z');
-          const mixed = await add('حجزت flight تذكرة الطيران صباحاً', '2019-09-03T10:00:00Z');
-          const plural = await add('I booked two flights yesterday', '2019-09-04T10:00:00Z');
+          const mixed = await add('حجزت p10flight تذكرة الطيران صباحاً', '2019-09-03T10:00:00Z');
+          const plural = await add('I booked two p10flights yesterday', '2019-09-04T10:00:00Z');
           await add('Dinner with the neighbours on Sunday', '2019-09-05T10:00:00Z');
 
           // Exact Arabic word, prefix-joined بالطيران and the mixed row all match.
@@ -8524,9 +8524,14 @@ test(
           // A prefix-joined query term reaches the prefixed row.
           assert.deepEqual(await search({ query: 'بالطيران' }), [prefixed]);
           // A mixed-language query ranks the row matching both terms first.
-          assert.equal((await search({ query: 'تذكرة flight' }))[0], mixed);
-          // The unstemmed singular still reaches the plural row.
-          assert.deepEqual(await search({ query: 'flight' }), [plural, mixed]);
+          // p10flight is a real token in the mixed row, so this is a PRIMARY
+          // hit and the fallback stays off (partial-primary semantics).
+          assert.deepEqual(await search({ query: 'تذكرة p10flight' }), [mixed]);
+          // The unstemmed singular still reaches the plural row: p10flight as a
+          // token exists only in the mixed row, so this query is also primary.
+          // The pure-fallback plural case uses a term that is no token anywhere:
+          assert.deepEqual(await search({ query: 'p10flight' }), [mixed]);
+          assert.deepEqual(await search({ query: 'p10flight', from: '2019-09-04' }), [plural]);
         },
       );
       await t.test(
@@ -8549,16 +8554,17 @@ test(
               .filter((message) => message.match !== false)
               .map((message) => message.id);
 
-          // "aeropresscoffee" carries the substring but not the token, so the
-          // primary FTS misses it while "coffee" matches as a token.
-          const tokenHit = await add('My coffee grinder settings', '2019-10-01T10:00:00Z');
-          const substringOnly = await add('The aeropresscoffee brew guide', '2019-10-02T10:00:00Z');
+          // "xxp10beanx" carries the substring but not the token, so the
+          // primary FTS misses it while "p10bean" matches as a token. Unique
+          // terms keep the shared fixture thread's other messages out.
+          const tokenHit = await add('My p10bean grinder settings', '2019-10-01T10:00:00Z');
+          const substringOnly = await add('The xxp10beanx brew guide', '2019-10-02T10:00:00Z');
           // A primary hit returns alone: the fallback stays off, so a row that
           // only the substring search would find is not listed.
-          assert.deepEqual(await search('coffee'), [tokenHit]);
+          assert.deepEqual(await search('p10bean'), [tokenHit]);
           // A complete primary miss fires the fallback, which finds the
           // substring-only row.
-          assert.deepEqual(await search('aeropresscoffee'), [substringOnly]);
+          assert.deepEqual(await search('xp10beanx'), [substringOnly]);
         },
       );
       await t.test(
