@@ -344,7 +344,7 @@ function requestParts(
     ...(context.retrievalFirst
       ? {
           notInjected:
-            'Tasks, instructions and saved memory are not in this request: the task list reads open work, memory_find reads saved facts, docs_search reads Nod guides. Earlier conversation is not in this request: history_search {query,around} reads complete original messages at the point you need. Retrieve before answering or acting on anything not in this request.',
+            'Tasks, instructions and saved memory are not in this request: the task list reads open work, memory_find reads saved facts, docs_search reads Nod guides; read only the branch this request needs. Earlier conversation is not in this request: history_search {query,around} reads complete original messages at the point you need; retrieve only the relevant segment, widen only when the first result is insufficient. Retrieve before answering or acting on anything not in this request.',
         }
       : {}),
     ...(context.relatedConversation?.length
