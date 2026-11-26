@@ -456,6 +456,51 @@ function earlierResults(started: number) {
   };
 }
 
+/**
+ * Duplicate reads within a session: when the replayed transcript already
+ * carries a byte-identical result for the same tool, later copies collapse
+ * to a pointer at the first one. Only exact matches collapse - any content
+ * change keeps both in full - and the rewrite happens at context build, so
+ * the originals stay intact in the session store. Registered after
+ * earlierResults so a fresh re-read of a pruned earlier result is never
+ * collapsed into the prune note.
+ */
+function duplicateResults(pi: ExtensionAPI) {
+  const dedupe = <T extends { role: string }>(messages: T[]) => {
+    const seen = new Map<string, number>();
+    return messages.map((message) => {
+      if (message.role !== 'toolResult') return message;
+      const result = message as unknown as ToolResultMessage;
+      const text = contentText(result.content);
+      // Placeholder rewrites (the earlierResults note or this pointer) are
+      // not reads: collapsing them would chain pointers at placeholders and
+      // break the prune's stable-prefix property.
+      if (text.includes('Never repeat an action only to see its result.')) return message;
+      const key = `${result.toolName}\n${text}`;
+      const earlier = seen.get(key);
+      if (earlier === undefined) {
+        seen.set(key, 1);
+        return message;
+      }
+      seen.set(key, earlier + 1);
+      return {
+        ...message,
+        content: [
+          {
+            type: 'text' as const,
+            text: `This ${result.toolName} result is identical to the earlier one in this conversation (${text.length.toLocaleString('en-US')} characters) and is not repeated. Never repeat an action only to see its result.`,
+          },
+        ],
+      };
+    });
+  };
+  pi.on('context', ({ messages }) => ({ messages: dedupe(messages) }));
+  pi.on('session_before_compact', ({ preparation }) => {
+    preparation.messagesToSummarize = dedupe(preparation.messagesToSummarize);
+    preparation.turnPrefixMessages = dedupe(preparation.turnPrefixMessages);
+  });
+}
+
 function completeAssistantMessages(pi: ExtensionAPI) {
   pi.on('message_end', ({ message }) => {
     if (message.role !== 'assistant') return;
@@ -1107,6 +1152,7 @@ export function createPiAgent(options: {
               ]
             : []),
           earlierResults(requestStart(manager)),
+          duplicateResults,
           recentImages,
           draft2020Tools,
           audioContext(manager, readsNativeAudio(model) && Boolean(input.readAudio)),

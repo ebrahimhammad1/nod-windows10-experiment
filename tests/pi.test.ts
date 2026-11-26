@@ -10045,6 +10045,107 @@ test('a new request after the cache went cold leaves large earlier tool results 
   assert.ok((await localText(join(directory, threadId))).includes('LARGE-RESULT-1'));
 });
 
+test('repeated identical reads collapse to a pointer at the first copy', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-duplicate-results-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const requests: string[][] = [];
+  const script: string[] = [];
+  const contents: string[] = [];
+  const agent = createPiAgent({
+    provider: 'openai',
+    apiKey: 'fixture-key',
+    sessionRoot: directory,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      result.session.setActiveToolsByName(result.session.getAllTools().map((tool) => tool.name));
+      result.session.agent.streamFunction = (model, context) => {
+        requests.push(context.messages.map((message) => JSON.stringify(message)));
+        const step = script.shift() ?? 'answer';
+        const message: AssistantMessage = {
+          ...fauxAssistantMessage(
+            step === 'answer'
+              ? [{ type: 'text', text: `Conclusion ${requests.length}.` }]
+              : [{ type: 'toolCall', id: randomUUID(), name: step, arguments: {} }],
+          ),
+          provider: model.provider,
+          model: model.id,
+          api: model.api,
+          stopReason: step === 'answer' ? 'stop' : 'toolUse',
+          timestamp: Date.now(),
+        };
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: 'done', reason: message.stopReason as 'stop', message });
+        return stream;
+      };
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const threadId = randomUUID();
+  const turn = async (prompt: string, steps: string[], newRequest = true) => {
+    script.push(...steps);
+    const session = await agent.open({
+      ...fakeExecution(threadId, randomUUID()),
+      newRequest,
+      systemPrompt: 'Fixture system',
+      ...sandbox,
+      tools: [
+        {
+          name: 'read_report',
+          description: 'Read a synthetic report.',
+          parameters: { type: 'object', properties: {} },
+          eager: true,
+          execute: async () => ({ content: [{ type: 'text', text: contents.shift()! }] }),
+        },
+        {
+          name: 'read_note',
+          description: 'Read a small synthetic note.',
+          parameters: { type: 'object', properties: {} },
+          eager: true,
+          execute: async () => ({ content: [{ type: 'text', text: 'NOTE-SAME' }] }),
+        },
+      ],
+      shouldStop: () => false,
+      onEvent() {},
+    });
+    await session.prompt(prompt, []);
+    await session.dispose();
+    await setTimeout(2);
+  };
+  const text = (request: string[]) => request.join('\n');
+  const copies = (request: string[], marker: string) => text(request).split(marker).length - 1;
+  const pointer = (tool: string) =>
+    `This ${tool} result is identical to the earlier one in this conversation`;
+
+  // Two identical reads inside one turn: the second copy collapses.
+  const reportA = `REPORT-A ${'x'.repeat(3000)}`;
+  contents.push(reportA, reportA);
+  await turn('Synthetic first look', ['read_report', 'read_report', 'read_note', 'answer']);
+  assert.equal(copies(requests[2]!, 'REPORT-A'), 1);
+  assert.ok(text(requests[2]!).includes(pointer('read_report')));
+
+  // A fresh read of unchanged content in a new request stays in full: the
+  // earlier large copies aged out, so nothing identical remains to point at.
+  // The small note, never pruned, is the duplicate that collapses instead.
+  contents.push(reportA);
+  await turn('Synthetic second look', ['read_report', 'read_note', 'answer']);
+  assert.equal(copies(requests[5]!, 'REPORT-A'), 1);
+  assert.ok(!text(requests[5]!).includes(pointer('read_report')));
+  assert.ok(text(requests[5]!).includes('came from an earlier request and is no longer in context'));
+  assert.equal(copies(requests[6]!, 'NOTE-SAME'), 1);
+  assert.ok(text(requests[6]!).includes(pointer('read_note')));
+
+  // Changed content never collapses, even back to back in one turn.
+  contents.push(`REPORT-B ${'y'.repeat(3000)}`, `REPORT-C ${'z'.repeat(3000)}`);
+  await turn('Synthetic third look', ['read_report', 'read_report', 'answer']);
+  assert.equal(copies(requests[9]!, 'REPORT-B'), 1);
+  assert.equal(copies(requests[9]!, 'REPORT-C'), 1);
+  assert.ok(!text(requests[9]!).includes(pointer('read_report')));
+
+  // The session store keeps every original.
+  assert.ok((await localText(join(directory, threadId))).includes(reportA));
+});
+
 test('a failed model request leaves none of its unanswered input for later turns', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-failed-request-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
