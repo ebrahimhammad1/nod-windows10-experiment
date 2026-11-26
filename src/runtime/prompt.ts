@@ -124,12 +124,15 @@ const DIGEST_LINE = 140;
 
 /**
  * Rolling history for light turns: the same recent window compactHistory
- * keeps, PLUS a bounded one-line-per-message digest of the dropped older
- * messages. The digest preserves what was decided and asked (owner lines in
- * the owner's own words, shortened) without re-sending full text; originals
- * stay recoverable through history_search. Deterministic, no model call.
- * When the digest exceeds its budget the NEWEST lines win (closest to the
- * current turn) and the omission count is stated.
+ * keeps, PLUS a bounded extractive digest of the dropped older messages:
+ * one line per message carrying only its first ~140 characters. This is NOT
+ * a summary and does NOT preserve decisions: anything past a message's first
+ * line (a decision stated at the end of a long message, a list's tail) is
+ * absent, and when the digest exceeds its budget the NEWEST lines win while
+ * older lines are dropped with only their count stated. Every dropped
+ * original stays recoverable through history_search, and the request guide
+ * tells the model to read source messages before claims about earlier work.
+ * Deterministic, no model call.
  */
 export function rollingHistory(
   history: RuntimeContext['history'],
@@ -155,13 +158,51 @@ export function rollingHistory(
 }
 
 /**
- * A light turn: an ordinary conversation message that is short and carries no
- * structural complexity markers (the same heuristic family as the Auto effort
- * signal - a STRUCTURAL proxy, not semantic understanding). Light turns get
- * rolling history and a gateway-only tool set (every capability stays
- * reachable just-in-time through nod_tool); anything richer takes the full
- * context. Task, background, proactive, scheduled, attachment, sign-in and
- * failed-turn continuations are never light.
+ * Back-reference markers (English and Arabic): a message containing any of
+ * these refers to earlier conversation or standing facts, so it needs the
+ * full context and memory selection even when short. A structural proxy,
+ * not semantic understanding - biased to false positives (a harmless full
+ * turn) over false negatives (a light turn missing needed context).
+ */
+const REFERENTIAL_MARKERS = [
+  // English
+  'remember',
+  'we decide',
+  'we agree',
+  'you said',
+  'i told you',
+  'last time',
+  'as usual',
+  'the usual',
+  'previously',
+  'like before',
+  // Arabic (MSA and Egyptian)
+  'اتفقنا',
+  'قررنا',
+  'قلنا',
+  'قلتلك',
+  'قلت لك',
+  'المرة اللي فاتت',
+  'اللي فات',
+  'فتكر',
+  'افتكر',
+  'قبل كده',
+  'زي المرة',
+  'المعتاد',
+  'زي كل مرة',
+];
+
+/**
+ * A light turn: an ordinary conversation message that is short, carries no
+ * structural complexity markers and no back-reference markers (the same
+ * heuristic family as the Auto effort signal - a STRUCTURAL proxy, not
+ * semantic understanding). Light turns get rolling history and skip the
+ * memory-selection request; anything richer takes the full context. Task,
+ * background, proactive, scheduled, attachment, sign-in and failed-turn
+ * continuations are never light. Known residual gap: a short message that
+ * needs memory or earlier context WITHOUT any marker below still classifies
+ * light; the mitigations are the digest, the always-available memory and
+ * history_search tools, and this gate's conservative bias.
  */
 export function lightTurn(context: RuntimeContext): boolean {
   if (context.taskContext || context.background || context.proactivity) return false;
@@ -171,6 +212,8 @@ export function lightTurn(context: RuntimeContext): boolean {
   if (context.previousFailure || context.withdrawnRequest) return false;
   const text = context.prompt.trim();
   if (!text || text.length > 1200) return false;
+  const lower = text.toLowerCase();
+  if (REFERENTIAL_MARKERS.some((marker) => lower.includes(marker))) return false;
   return !promptStructuralComplexity(text);
 }
 

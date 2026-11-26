@@ -410,9 +410,6 @@ export interface AgentSession {
   readsImages?: boolean;
   readsAudio?: boolean;
   compactContext?: boolean;
-  // Restrict this turn's active tools to the gateway-only light set (every
-  // capability stays reachable just-in-time through nod_tool). Per turn.
-  setLightTurn?(light: boolean): void;
   prompt(
     text: string,
     images: AgentImage[],

@@ -55,6 +55,47 @@ test('lightTurn rejects attachments, sign-in forms, failures and rich or empty m
   assert.equal(lightTurn(baseContext({ prompt: '   ' })), false);
 });
 
+test('lightTurn rejects short back-referencing messages, English and Arabic', () => {
+  // Short messages that refer to earlier context or standing facts take the
+  // full context and memory selection even though they are structurally
+  // simple.
+  assert.equal(lightTurn(baseContext({ prompt: 'what did we decide?' })), false);
+  assert.equal(lightTurn(baseContext({ prompt: 'the usual please' })), false);
+  assert.equal(lightTurn(baseContext({ prompt: 'do you remember her name?' })), false);
+  assert.equal(lightTurn(baseContext({ prompt: 'قوللي اللي اتفقنا عليه' })), false);
+  assert.equal(lightTurn(baseContext({ prompt: 'طب وقررنا إيه؟' })), false);
+  assert.equal(lightTurn(baseContext({ prompt: 'نفس المرة اللي فاتت' })), false);
+  assert.equal(lightTurn(baseContext({ prompt: 'اطلب المعتاد' })), false);
+  assert.equal(lightTurn(baseContext({ prompt: 'زي ما قلنا قبل كده' })), false);
+  assert.equal(lightTurn(baseContext({ prompt: 'فتكر إيه رأيي؟' })), false);
+});
+
+test('lightTurn accepts a short topic change without back-references', () => {
+  assert.equal(lightTurn(baseContext({ prompt: 'تمام، سؤال تاني: إيه عاصمة اليابان؟' })), true);
+  assert.equal(lightTurn(baseContext({ prompt: 'ok new topic - capital of Japan?' })), true);
+});
+
+test('rollingHistory digest is extractive: content past the first 140 chars is absent', () => {
+  // A decision stated at the END of a long message is not in the digest.
+  // This test pins the limitation; recovery is through history_search.
+  const lead = 'owner talked about weekend plans and the weather and the trip packing list ';
+  const decision = 'FINAL DECISION: we fly Thursday not Friday';
+  const history = [
+    message('user', lead.repeat(4) + decision, 50),
+    message('assistant', 'Noted.', 49),
+    ...Array.from({ length: 8 }, (_, i) =>
+      message(i % 2 === 0 ? 'user' : 'assistant', `recent exchange line ${i} `.repeat(12), 10 - i),
+    ),
+  ];
+  const rolled = rollingHistory(history);
+  assert.ok(rolled.recent.length < history.length);
+  assert.ok(
+    !rolled.digest.includes(decision),
+    'a tail decision must NOT appear in the extractive digest',
+  );
+  assert.match(rolled.digest, /owner: owner talked about weekend plans/);
+});
+
 test('rollingHistory keeps the compact recent window and digests the dropped rest', () => {
   const history = [
     message('user', 'decision: we go with the cheap plan, cancel the other one', 50),

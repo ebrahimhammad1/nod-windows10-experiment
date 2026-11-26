@@ -1766,30 +1766,22 @@ export function createPiAgent(options: {
         warming.set(directory, release);
       };
       active.set(session, dispose);
-      // Light turns (set per owner turn by the runtime): only the gateway
-      // tools are active - send_message/ask_user plus nod_tool and
-      // nod_tool_search, through which every load-on-demand capability stays
-      // reachable just-in-time with its validation and execution unchanged.
-      let light = false;
-      const LIGHT_TOOLS = new Set(['send_message', 'ask_user', 'nod_tool', 'nod_tool_search']);
       return {
         resumed,
         readsImages: model.input.includes('image'),
         readsAudio: readsNativeAudio(model) && Boolean(input.readAudio),
         compactContext: budget.compact,
-        setLightTurn(value: boolean) {
-          light = value;
-        },
         async prompt(text, images, audio, stablePrefixes) {
           cached.stable = stablePrefixes;
           // Evict on-demand tools at the owner-turn boundary: no tool call is
           // pending here, and mid-turn sequences (search, call, answer) keep
           // everything they loaded until the turn ends.
+          // Tools are just-in-time in every loadout: all non-eager tools are
+          // deferred behind the nod_tool gateway catalog and activate on use,
+          // so a light turn needs no separate restriction here.
           if (!budget.compact)
             session.setActiveToolsByName(
-              light
-                ? directTools.filter((name) => LIGHT_TOOLS.has(name))
-                : directTools.filter((name) => exposureOf.get(name) !== 'deferred'),
+              directTools.filter((name) => exposureOf.get(name) !== 'deferred'),
             );
           const owner = input.ownerContext;
           const copy = manager.buildSessionContext().messages.findLast(isOwnerContext);
