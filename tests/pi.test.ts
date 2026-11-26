@@ -10121,6 +10121,11 @@ test('completed owner envelopes collapse to step markers and the last exchange s
   assert.ok(latest.includes('\\"currentInstruction\\":\\"third task\\"'));
   assert.ok(latest.includes('\\"currentInstruction\\":\\"fourth task\\"'));
   assert.ok(latest.includes('frozen memory snapshot for third task'));
+  // Completed turns fold into their step line: old assistant replies leave
+  // the context; the last exchange's reply stays.
+  assert.equal(latest.includes('Conclusion 1.'), false);
+  assert.equal(latest.includes('Conclusion 2.'), false);
+  assert.ok(latest.includes('Conclusion 3.'));
   // Originals stay in the session store: pointer retrieval reads them whole.
   const stored = await localText(join(directory, threadId));
   assert.ok(stored.includes('frozen memory snapshot for first task'));

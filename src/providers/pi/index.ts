@@ -540,7 +540,17 @@ function earlierEnvelopes(pi: ExtensionAPI) {
     const collapseAt = collapsed >= 1 ? prunable[0]! : -1;
     const dropped = new Set(collapsed >= 1 ? prunable.slice(0, collapsed) : []);
     const marked = new Set(collapsed >= 1 ? prunable.slice(collapsed) : prunable);
+    // Completed turns fold into their step line entirely: the old assistant
+    // replies and tool calls/results before the last exchange leave the
+    // context too (originals stay searchable in the store). Only the last
+    // exchange and the current message keep their assistant/tool messages.
+    const boundary = prunable.length ? envelopes[envelopes.length - 2]! : messages.length;
     return messages.flatMap((message, index) => {
+      if (
+        index < boundary &&
+        (message.role === 'assistant' || message.role === 'toolResult' || message.role === 'tool')
+      )
+        return [];
       if (index === collapseAt)
         return [
           {
