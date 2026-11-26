@@ -1227,7 +1227,9 @@ export function createAgentRuntime(dependencies: {
             void pendingReplies.catch(() => {});
           }
           if (event.type === 'retry' && !stopped) {
-            const retry = `${event.model} failed, trying again (${event.attempt} of ${event.attempts})`;
+            const retry = event.detail
+              ? `${event.model}: ${event.detail}`
+              : `${event.model} failed, trying again (${event.attempt} of ${event.attempts})`;
             pendingReplies = pendingReplies.then(() =>
               context.emit('retry', retry, { execution }).catch(() => {}),
             );

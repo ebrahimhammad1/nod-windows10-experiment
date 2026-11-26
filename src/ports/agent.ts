@@ -350,7 +350,15 @@ export type AgentEvent =
     }
   | { type: 'text_delta'; text: string }
   | { type: 'thinking'; title: string }
-  | { type: 'retry'; model: string; attempt: number; attempts: number }
+  | {
+      type: 'retry';
+      model: string;
+      attempt: number;
+      attempts: number;
+      // Precise reason when this is not a failure retry, e.g. quota pacing:
+      // shown instead of the generic "failed, trying again" activity line.
+      detail?: string;
+    }
   | { type: 'fallback'; from: string; to: string }
   | { type: 'final'; text: string }
   | ModelUsageObservation

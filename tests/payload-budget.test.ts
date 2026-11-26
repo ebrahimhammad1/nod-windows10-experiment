@@ -109,7 +109,14 @@ const CORE_DECLARED = [
 
 async function openSession(
   t: test.TestContext,
-  opts?: { bigExec?: boolean; validatingMemory?: boolean; bigResult?: string; bigThrow?: string },
+  opts?: {
+    bigExec?: boolean;
+    validatingMemory?: boolean;
+    bigResult?: string;
+    bigThrow?: string;
+    stopAfterMs?: number;
+    stopAfterFirstRequest?: boolean;
+  },
 ) {
   const modelId = `fixture-${randomUUID().slice(0, 8)}`;
   const { createPiAgent } = await import('../src/providers/pi/index.ts');
@@ -152,6 +159,7 @@ async function openSession(
     },
   }));
   const events: any[] = [];
+  const startedAt = Date.now();
   const agent = createPiAgent({
     provider: 'compatible',
     sessionRoot,
@@ -197,7 +205,10 @@ async function openSession(
     workspace,
     runTool: async (_n: string, _p: unknown, run: any) => run(),
     onEvent: (event: any) => events.push(event),
-    shouldStop: () => false,
+    shouldStop: () =>
+      opts?.stopAfterFirstRequest
+        ? REQUESTS.length >= 1
+        : Date.now() - startedAt > (opts?.stopAfterMs ?? Number.POSITIVE_INFINITY),
   } as any);
   return { session, executed, events, modelId };
 }
@@ -311,9 +322,31 @@ test('a 429 per-minute rejection retries at the provider hint even with the bill
   const waited = Date.now() - started;
   assert.equal(REQUESTS.length, 2, 'the paced retry resends the same request once');
   assert.ok(waited >= 400, `the retry must honor the provider hint, waited ${waited}ms`);
+  const retry = events.find((event) => event.type === 'retry');
+  assert.ok(retry, `the retry must be visible, got: ${JSON.stringify(events.map((e) => e.type))}`);
+  assert.match(
+    retry.detail ?? '',
+    /rate limited, retrying in about 1s/,
+    'a pacing wait must SAY it is pacing, never the generic failure text',
+  );
+  await session.dispose();
+});
+
+test('a user cancel interrupts the 429 pacing wait instead of hanging', async (t) => {
+  responders = [groq429(), textReply('never reached')];
+  callIndex = 0;
+  REQUESTS.length = 0;
+  const { session, events } = await openSession(t, { stopAfterFirstRequest: true });
+  const started = Date.now();
+  // pi converts a stopped streamFunction into an error-message turn end, so
+  // the observable contract is: the pacing wait exits at once, the paced
+  // retry is never sent, and the pacing event was already shown.
+  await session.prompt('hi', []);
+  assert.ok(Date.now() - started < 400, 'the cancel lands inside the 0.4s hint window');
+  assert.equal(REQUESTS.length, 1, 'the paced retry is never sent after a cancel');
   assert.ok(
-    events.some((event) => event.type === 'retry'),
-    `the retry must be visible, got: ${JSON.stringify(events.map((e) => e.type))}`,
+    events.some((event) => event.type === 'retry' && /rate limited/.test(event.detail ?? '')),
+    'the pacing wait is announced with its real reason',
   );
   await session.dispose();
 });

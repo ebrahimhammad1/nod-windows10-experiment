@@ -1433,7 +1433,13 @@ export function createPiAgent(options: {
         if (!fallback && quotaKey) {
           const outputWait = outputBudgetWaitMs(quotaKey);
           if (outputWait > 0) {
-            input.onEvent({ type: 'retry', model: target.id, attempt: 1, attempts: 2 });
+            input.onEvent({
+              type: 'retry',
+              model: target.id,
+              attempt: 1,
+              attempts: 2,
+              detail: 'waiting for the per-minute output limit to reset',
+            });
             // Abortable: poll the turn's stop flag while the window resets so
             // a user cancel interrupts the wait instead of hanging 60s.
             const deadline = Date.now() + outputWait;
@@ -1470,8 +1476,22 @@ export function createPiAgent(options: {
             // results stay in context and are not replayed.
             const wait = retryableRateLimitWait(message);
             if (wait === undefined || attempt === 1) throw error;
-            input.onEvent({ type: 'retry', model: target.id, attempt: attempt + 1, attempts: 2 });
-            await new Promise((resolve) => setTimeout(resolve, wait));
+            input.onEvent({
+              type: 'retry',
+              model: target.id,
+              attempt: attempt + 1,
+              attempts: 2,
+              detail: `rate limited, retrying in about ${Math.ceil(wait / 1000)}s`,
+            });
+            // Same abortable pattern as the output-window wait: a user
+            // cancel interrupts the pacing wait instead of hanging.
+            {
+              const deadline = Date.now() + wait;
+              while (Date.now() < deadline) {
+                if (input.shouldStop?.()) throw new Error('The turn was stopped.');
+                await new Promise((resolve) => setTimeout(resolve, Math.min(250, deadline - Date.now())));
+              }
+            }
             continue;
           }
           const result = await response.result();
@@ -1491,8 +1511,20 @@ export function createPiAgent(options: {
           }
           const wait = retryableRateLimitWait(result.errorMessage);
           if (wait !== undefined && attempt < 1) {
-            input.onEvent({ type: 'retry', model: target.id, attempt: attempt + 1, attempts: 2 });
-            await new Promise((resolve) => setTimeout(resolve, wait));
+            input.onEvent({
+              type: 'retry',
+              model: target.id,
+              attempt: attempt + 1,
+              attempts: 2,
+              detail: `rate limited, retrying in about ${Math.ceil(wait / 1000)}s`,
+            });
+            {
+              const deadline = Date.now() + wait;
+              while (Date.now() < deadline) {
+                if (input.shouldStop?.()) throw new Error('The turn was stopped.');
+                await new Promise((resolve) => setTimeout(resolve, Math.min(250, deadline - Date.now())));
+              }
+            }
             continue;
           }
           if (compaction) compaction.requests.push(result);
