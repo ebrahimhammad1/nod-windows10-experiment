@@ -1,3 +1,4 @@
+import { lightestEffort } from './models.ts';
 import type { ModelChoice, ModelEffort, ModelMethod, ModelProvider } from './models.ts';
 
 export const agentModels: Partial<Record<ModelProvider, string>> = {
@@ -71,4 +72,33 @@ export function defaultEffort(provider: ModelProvider, model: ModelChoice): Mode
       ? 'medium'
       : 'high';
   return model.efforts.includes(preferred) ? preferred : model.efforts[0];
+}
+
+/**
+ * The one effort value that is a MODE, not a level. Stored selections may
+ * carry 'auto'; providers only ever receive the concrete level this helper
+ * resolves to. Policy (no extra LLM classification calls by default):
+ *   - a model with a single effort level resolves to it;
+ *   - a zero-priced or unpriced/'variable' model resolves to the provider
+ *     default (full capability - no cost or quota reason to degrade);
+ *   - a priced model resolves to the lightest level (cost guard).
+ * The level always comes from the model's OWN effort list - a level the
+ * provider does not support is never invented.
+ * Known limit: per-task complexity is not visible at selection-resolution
+ * time, so this v1 does not adapt within a connection by request size; the
+ * payload-estimate layer is the future seam for that signal.
+ */
+export function resolveSelectionEffort(
+  provider: ModelProvider,
+  model: ModelChoice,
+  effort: ModelEffort | 'auto',
+): ModelEffort {
+  if (effort !== 'auto') return effort;
+  if (!model.efforts.length) throw new Error(`Model ${model.id} supports no effort levels.`);
+  if (model.efforts.length === 1) return model.efforts[0]!;
+  const pricing = model.pricing;
+  const free = pricing && pricing !== 'variable' && pricing.input + pricing.output === 0;
+  return free || !pricing || pricing === 'variable'
+    ? defaultEffort(provider, model)
+    : lightestEffort(model.efforts);
 }
