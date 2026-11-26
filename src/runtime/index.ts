@@ -1161,6 +1161,7 @@ export function createAgentRuntime(dependencies: {
         contextRestart: context.contextRestart,
         ...(context.proactivity ? { restricted: true } : {}),
         newRequest: !context.resumed,
+        ...(retrievalFirstTurn(context) ? { deferTools: true } : {}),
         ...(context.scheduleCache ? { scheduleCache: context.scheduleCache } : {}),
         ...(sessionId === threadId && !context.proactivity && dependencies.keepWarm
           ? { keepWarm: () => dependencies.keepWarm!(threadId) }

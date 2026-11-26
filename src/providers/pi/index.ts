@@ -853,8 +853,16 @@ export function createPiAgent(options: {
       // every other capability (sandbox tools included) stays reachable
       // through the nod_tool gateway, which dispatches to the same mapped
       // definitions with their validation and execution paths unchanged.
+      // Deferral is also the retrieval-first conversation default
+      // (input.deferTools, measured -16% session bytes on top of the
+      // retrieval-first prompt): only send_message, ask_user, nod_tool and
+      // nod_tool_search are declared; the gateway dispatches to the same
+      // mapped definitions, so validation, approvals and output bounding
+      // are unchanged.
       const minimalLoadout =
-        process.env.NOD_TOOL_LOADOUT === 'minimal' && !input.restricted && !budget.compact;
+        (process.env.NOD_TOOL_LOADOUT === 'minimal' || input.deferTools) &&
+        !input.restricted &&
+        !budget.compact;
       // Local-review ZERO-DEFINITION loadout (NOD_TOOL_LOADOUT=zero): no tool
       // schemas are declared at all. The system prompt carries only a compact
       // command protocol; the turn loop in prompt() parses one-JSON-object

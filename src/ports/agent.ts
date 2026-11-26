@@ -386,6 +386,11 @@ export interface AgentSessionOptions extends ExecutionScope {
   restricted?: boolean;
   ephemeral?: boolean;
   newRequest?: boolean;
+  // Retrieval-first conversation turns declare only the minimal tool set;
+  // every other capability stays reachable through the nod_tool gateway and
+  // nod_tool_search discovery. Task, background, attachment and other
+  // full-context turns keep the complete declared surface.
+  deferTools?: boolean;
   scheduleCache?: 'short' | 'long';
   contextRestart?: string;
   keepWarm?(): Promise<boolean>;
