@@ -410,6 +410,46 @@ test('a learned output quota clamps max_tokens so the provider stops rejecting o
   await session.dispose();
 });
 
+test('a nearly exhausted output window waits and never requests a sub-64 remainder', async (t) => {
+  // The floor-64 case: with only 5 output tokens left in the learned
+  // per-minute window the session must not send a request against the tiny
+  // remainder (or worse, a floored 64) - it waits out the window, announces
+  // the wait, and then requests within the fresh limit.
+  responders = [textReply('after the wait')];
+  callIndex = 0;
+  REQUESTS.length = 0;
+  const { session, events, modelId } = await openSession(t);
+  const key = `compatible/api_key/${modelId}`;
+  learnOutputQuota(
+    key,
+    'Request too large for model `fixture-groq` on output tokens per minute (OTPM): Limit 1000, Requested 1232.',
+  );
+  // Park the clock 300ms before the minute boundary so the wait is short but
+  // real: noteObservedOutput and the wait loop share the mocked clock.
+  const realNow = Date.now;
+  const offset = 60_000 - (realNow() % 60_000) - 300;
+  t.mock.method(Date, 'now', () => realNow() + offset);
+  noteObservedOutput(key, 995);
+  assert.equal(remainingOutputBudget(key), 5, 'fixture: 5 tokens left in the window');
+  const started = realNow();
+  await session.prompt('hi', []);
+  assert.ok(realNow() - started >= 400, 'the turn waited out the window');
+  assert.equal(REQUESTS.length, 1);
+  assert.equal(
+    REQUESTS[0].max_tokens,
+    1000,
+    `the request goes against the fresh window, got ${REQUESTS[0].max_tokens}`,
+  );
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === 'retry' && /per-minute output limit/.test(event.detail ?? ''),
+    ),
+    'the wait is announced with its real reason',
+  );
+  await session.dispose();
+});
+
 test('a thrown tool error is bounded like a result and keeps its error flag', async (t) => {
   responders = [
     callReply('nod_tool', { name: 'memory', args: { action: 'memory_read' } }, 'c1'),
