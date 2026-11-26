@@ -13343,7 +13343,7 @@ test(
       CREATE TABLE discovered_connections(id uuid,owner_id text,reconnect_required boolean,replaced_at timestamptz,paths jsonb,created_at timestamptz DEFAULT now());
       CREATE TABLE model_connections(id uuid,owner_id text,provider text,method text,status text,managed boolean,models jsonb,request_failures jsonb,created_at timestamptz DEFAULT now());
       CREATE TABLE model_settings(owner_id text,selection jsonb,routes jsonb);
-      CREATE TABLE preferences(owner_id text,notification_rule text,time_zone text,quiet_start text,quiet_end text,quiet_hours_enabled boolean,locale text,hour_cycle text,rules text,speech_reply text,proactive_paused boolean,local_files_enabled boolean);
+      CREATE TABLE preferences(owner_id text,notification_rule text,time_zone text,quiet_start text,quiet_end text,quiet_hours_enabled boolean,locale text,hour_cycle text,rules text,speech_reply text,proactive_paused boolean,local_files_enabled boolean,terse_output boolean NOT NULL DEFAULT false);
       CREATE TABLE spending_limits(owner_id text,monthly_usd double precision,task_usd double precision,preparation_usd double precision);
       CREATE TABLE channel_settings(owner_id text,provider text,enabled boolean,summary jsonb,updated_at timestamptz DEFAULT now());
       CREATE TABLE integration_events(id text,owner_id text,slug text,state text,created_at timestamptz DEFAULT now());
