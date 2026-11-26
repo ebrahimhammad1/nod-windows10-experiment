@@ -1337,7 +1337,13 @@ export function createPiAgent(options: {
           const outputWait = outputBudgetWaitMs(quotaKey);
           if (outputWait > 0) {
             input.onEvent({ type: 'retry', model: target.id, attempt: 1, attempts: 2 });
-            await new Promise((resolve) => setTimeout(resolve, outputWait));
+            // Abortable: poll the turn's stop flag while the window resets so
+            // a user cancel interrupts the wait instead of hanging 60s.
+            const deadline = Date.now() + outputWait;
+            while (Date.now() < deadline) {
+              if (input.shouldStop?.()) throw new Error('The turn was stopped.');
+              await new Promise((resolve) => setTimeout(resolve, Math.min(250, deadline - Date.now())));
+            }
           }
         }
         const outputCap = quotaKey ? remainingOutputBudget(quotaKey) : undefined;
