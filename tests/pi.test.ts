@@ -275,8 +275,11 @@ test('models and routers complete tool discovery inside the endpoint context', a
         }
         if (!summarizing)
           assert.ok(
-            body.tools.some((tool: any) => tool.function.name === 'apps'),
-            'Connected apps are unreachable without the apps tool.',
+            body.tools.some(
+              (tool: any) =>
+                tool.function.name === 'apps' || tool.function.name === 'nod_tool_search',
+            ),
+            'Connected apps are unreachable without the apps tool or its discovery search.',
           );
         const call = summarizing ? undefined : calls[requests++];
         if (call) assert.ok(body.tools.some((tool: any) => tool.function.name === call[0]));
@@ -2690,7 +2693,14 @@ test('the owner command stream records exit status and output without known secr
               timestamp: Date.now(),
               stopReason: call ? 'toolUse' : 'stop',
               content: call
-                ? [{ type: 'toolCall', id: `bash-${step}`, name: 'bash', arguments: call }]
+                ? [
+                    {
+                      type: 'toolCall',
+                      id: `bash-${step}`,
+                      name: 'nod_tool',
+                      arguments: { name: 'bash', args: call },
+                    },
+                  ]
                 : [{ type: 'text', text: 'Done' }],
               usage: {
                 input: 1,
@@ -10018,10 +10028,20 @@ test('a new request after the cache went cold leaves large earlier tool results 
   assert.ok(followUp.includes('What did the first source say?'));
   assert.ok(text(requests[4]!).includes('LARGE-RESULT-2'));
   assert.deepEqual(requests[4]!.slice(0, requests[3]!.length), requests[3]);
-  for (const later of [5, 7, 8]) {
-    assert.ok(text(requests[later]!).includes('LARGE-RESULT-2'));
-    assert.deepEqual(requests[later]!.slice(0, requests[later - 1]!.length), requests[later - 1]);
+  // Every new owner request ages the previous turns' oversize results out
+  // of the replayed transcript, not only cold-cache restarts; the rewrite is
+  // monotonic, so after the first aged note later requests keep a
+  // byte-identical prefix.
+  for (const later of [5, 6, 7, 8]) {
+    const body = text(requests[later]!);
+    assert.equal(body.includes('LARGE-RESULT-2'), false);
+    assert.match(
+      body,
+      /This read_large result \(5,015 characters\) came from an earlier request and is no longer in context\./,
+    );
   }
+  for (const later of [6, 7, 8])
+    assert.deepEqual(requests[later]!.slice(0, requests[later - 1]!.length), requests[later - 1]);
   assert.ok((await localText(join(directory, threadId))).includes('LARGE-RESULT-1'));
 });
 
