@@ -171,3 +171,26 @@ describe('model failure scoping', { skip: !process.env.TEST_DATABASE_URL }, () =
     },
   );
 });
+
+describe('failureScope classifier', () => {
+  test('scopes credential-wide and per-model failures without universalizing 403', async () => {
+    const { failureScope } = await import('../src/server/models.ts');
+    // Rejected key / missing credits break every model on the connection.
+    assert.equal(failureScope(401, 'HTTP 401; invalid api key'), 'connection');
+    assert.equal(failureScope(402, 'HTTP 402; This request requires more credits.'), 'connection');
+    // The measured Cloudflare case: per-model plan availability.
+    assert.equal(
+      failureScope(
+        403,
+        'HTTP 403; @cf/deepseek-ai/deepseek-v4.1-flash-1017 is not available on the Workers Free plan',
+      ),
+      'model',
+    );
+    // Any other 403 may be account-wide: never universalized to model scope.
+    assert.equal(failureScope(403, 'HTTP 403; Forbidden'), 'connection');
+    assert.equal(failureScope(403, 'HTTP 403; Country, region, or territory not supported'), 'model');
+    // Ordinary per-model conditions.
+    assert.equal(failureScope(500, 'HTTP 500; Synthetic outage.'), 'model');
+    assert.equal(failureScope(undefined, 'fetch failed'), 'model');
+  });
+});

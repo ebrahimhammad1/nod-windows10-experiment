@@ -319,6 +319,22 @@ const credentialTag = (value: ModelCredential | undefined) =>
     .digest('hex');
 const failureWindow = (failures: number) =>
   Math.min(120_000 * 3 ** Math.max(0, failures - 1), 6 * 3_600_000);
+// Card scope of a recorded failure. 401/402 are credential-wide on every
+// provider (rejected key, missing credits): they break every model on the
+// connection, so they stay on the card after a model switch. 403 is
+// provider-specific: a per-model plan/availability refusal (measured:
+// Cloudflare "@cf/... not available on the Workers Free plan") belongs to
+// that model, while any other 403 may be account-wide and stays
+// connection-scoped. Everything else is a model-level condition.
+export function failureScope(status: number | undefined, reason: string): 'connection' | 'model' {
+  if (status === 401 || status === 402) return 'connection';
+  if (status === 403)
+    return /not available|no access|does not have access|not enabled|not supported/i.test(reason)
+      ? 'model'
+      : 'connection';
+  return 'model';
+}
+
 function failures(row: Pick<ModelRecord, 'requestFailures'> | undefined, tag: string | undefined) {
   return Object.entries(row?.requestFailures ?? {}).filter(
     ([, failure]) => tag && failure.credentialTag === tag,
@@ -588,20 +604,17 @@ export function createModelService(options: {
                   ? previous.failures
                   : (previous?.failures ?? 0) + 1;
               saved.requestFailures = Object.fromEntries(current);
+              const reason = redactSecretText(modelFailureReason(error))
+                .replace(/\s*\[request phase: [^\]]*\]\s*$/, '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 300);
               saved.requestFailures[modelId] = {
                 credentialTag: tag,
                 failures: count,
-                // A rejected key or empty credits fails EVERY model on the
-                // connection, so it stays on the card after a model switch;
-                // anything else (per-model plan availability, outages)
-                // belongs to that model only.
-                scope: status === 401 || status === 402 ? 'connection' : 'model',
+                scope: failureScope(status, reason),
                 retryAt: Date.now() + failureWindow(count),
-                reason: redactSecretText(modelFailureReason(error))
-                  .replace(/\s*\[request phase: [^\]]*\]\s*$/, '')
-                  .replace(/\s+/g, ' ')
-                  .trim()
-                  .slice(0, 300),
+                reason,
               };
               if (status === 401 && !saved.managed && saved.status === 'connected')
                 saved.status = 'reconnect';

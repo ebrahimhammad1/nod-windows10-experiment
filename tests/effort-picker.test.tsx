@@ -76,7 +76,7 @@ test('effort picker offers Auto and saves effort auto', async () => {
   const items = [...document.querySelectorAll('[role="menuitemradio"]')] as HTMLElement[];
   const texts = items.map((item) => item.textContent ?? '');
   assert.ok(texts.some((t) => /Auto/.test(t)), `Auto entry present, got: ${JSON.stringify(texts)}`);
-  assert.ok(texts.some((t) => /Nod picks the level for each request/.test(t)), 'auto hint shown');
+  assert.ok(texts.some((t) => /Lighter on simple requests, never above default/.test(t)), 'auto hint shown');
   const autoItem = items.find((item) => /Auto/.test(item.textContent ?? ''))!;
   assert.equal(autoItem.getAttribute('aria-checked'), 'false');
 
