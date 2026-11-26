@@ -8386,6 +8386,64 @@ test(
         },
       );
       await t.test(
+        'history search pages stay byte-bounded and the cursor reaches every match',
+        async () => {
+          const add = async (text: string, at: string) => {
+            const id = randomUUID();
+            await db.pool.query(
+              "INSERT INTO messages(id,owner_id,role,text,thread_id,created_at) VALUES($1,$2,'user',$3,$4,$5)",
+              [id, ownerId, text, freshThread, at],
+            );
+            return id;
+          };
+          const ids: string[] = [];
+          for (let index = 0; index < 12; index++)
+            ids.push(
+              await add(
+                `pagingbeacon ${index} ${'filler '.repeat(150)}`,
+                `2019-07-01T10:${String(index).padStart(2, '0')}:00Z`,
+              ),
+            );
+          type Page = {
+            messages: Array<{ id: string; text: string; match?: boolean }>;
+            complete: boolean;
+            nextCursor: string | null;
+          };
+          const seen = new Set<string>();
+          let cursor: string | undefined;
+          let pages = 0;
+          for (;;) {
+            const result = (await personal.manage('history_search', {
+              query: 'pagingbeacon',
+              ...(cursor ? { cursor } : {}),
+            })) as Page;
+            pages += 1;
+            const bytes = result.messages.reduce(
+              (total, message) => total + Buffer.byteLength(message.text),
+              0,
+            );
+            assert.ok(bytes <= 6000, `page ${pages} carries ${bytes} text bytes`);
+            for (const message of result.messages) {
+              if (!message.match) continue;
+              assert.ok(!seen.has(message.id), `match ${message.id} shown twice`);
+              seen.add(message.id);
+            }
+            if (result.complete) {
+              assert.equal(result.nextCursor, null);
+              break;
+            }
+            assert.ok(result.nextCursor, 'a truncated page must offer a cursor');
+            cursor = result.nextCursor;
+            assert.ok(pages < 12, 'cursor walk did not terminate');
+          }
+          assert.ok(
+            pages >= 2,
+            `expected the bound to split 12 long matches, got ${pages} page(s)`,
+          );
+          assert.deepEqual([...seen].sort(), [...ids].sort());
+        },
+      );
+      await t.test(
         'proactive preparation keeps source, delivery, and owner fences across restarts',
         async (t) => {
           const { createProactivity } = await import('../src/server/proactivity.ts');
