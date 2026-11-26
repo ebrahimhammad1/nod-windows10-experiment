@@ -92,6 +92,15 @@ export function createContextOutput(
       characters: text.length,
       preview: text.length > previewCharacters ? text.slice(0, previewCharacters - tail) : text,
       ...(tail && text.length > previewCharacters ? { tail: text.slice(-tail) } : {}),
+      // Optional script-summary path: the model can process the spilled file
+      // with the ordinary sandbox tools and bring back only the short
+      // printed result instead of reading the whole output into context.
+      ...(text.length > previewCharacters
+        ? {
+            process:
+              'To use the rest of this output, run a small script over workspaceFile with the sandbox tools and print only the short result you need. The printed output enters this conversation; the file does not unless you read it.',
+          }
+        : {}),
     });
   };
   return {

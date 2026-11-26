@@ -10045,6 +10045,28 @@ test('a new request after the cache went cold leaves large earlier tool results 
   assert.ok((await localText(join(directory, threadId))).includes('LARGE-RESULT-1'));
 });
 
+test('a spilled tool output points at its file and the optional script path', async () => {
+  const { createContextOutput } = await import('../src/providers/pi/context-output.ts');
+  const output = createContextOutput(
+    fakeWorkspace().open({ threadId: 'fixture', workspacePath: '/fixture/workspace', signal: new AbortController().signal }),
+    () => false,
+  );
+  const long = `LONG-OUTPUT ${'x'.repeat(5000)}`;
+  const spilled = JSON.parse(
+    await output.save([{ type: 'text' as const, text: long }], 1000),
+  );
+  assert.equal(spilled.characters, long.length);
+  assert.ok(spilled.workspaceFile.endsWith('.txt'));
+  assert.ok(spilled.preview.length < 1000);
+  assert.ok(spilled.tail.length > 0);
+  assert.ok(spilled.process.includes('small script over workspaceFile'));
+  assert.ok(spilled.process.includes('sandbox tools'));
+  // An output that fits its preview is returned whole, with no script nudge.
+  const fits = JSON.parse(await output.save([{ type: 'text' as const, text: 'short' }], 1000));
+  assert.equal(fits.preview, 'short');
+  assert.equal(fits.process, undefined);
+});
+
 test('repeated identical reads collapse to a pointer at the first copy', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-duplicate-results-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
