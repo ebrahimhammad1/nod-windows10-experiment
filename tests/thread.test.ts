@@ -8491,6 +8491,77 @@ test(
         },
       );
       await t.test(
+        'history search finds Arabic, mixed-language and unstemmed English rows',
+        async () => {
+          const add = async (text: string, at: string) => {
+            const id = randomUUID();
+            await db.pool.query(
+              "INSERT INTO messages(id,owner_id,role,text,thread_id,created_at) VALUES($1,$2,'user',$3,$4,$5)",
+              [id, ownerId, text, freshThread, at],
+            );
+            return id;
+          };
+          const search = async (args: Record<string, unknown>) =>
+            (
+              (await personal.manage('history_search', args)) as {
+                messages: Array<{ id: string; match?: boolean }>;
+              }
+            ).messages
+              .filter((message) => message.match !== false)
+              .map((message) => message.id);
+
+          const arabic = await add(
+            'أرجو إبلاغي بآخر تطورات الطيران المدني',
+            '2019-09-01T10:00:00Z',
+          );
+          const prefixed = await add('تطورات بالطيران المدني هذا الأسبوع', '2019-09-02T10:00:00Z');
+          const mixed = await add('حجزت flight تذكرة الطيران صباحاً', '2019-09-03T10:00:00Z');
+          const plural = await add('I booked two flights yesterday', '2019-09-04T10:00:00Z');
+          await add('Dinner with the neighbours on Sunday', '2019-09-05T10:00:00Z');
+
+          // Exact Arabic word, prefix-joined بالطيران and the mixed row all match.
+          assert.deepEqual(await search({ query: 'الطيران' }), [mixed, prefixed, arabic]);
+          // A prefix-joined query term reaches the prefixed row.
+          assert.deepEqual(await search({ query: 'بالطيران' }), [prefixed]);
+          // A mixed-language query ranks the row matching both terms first.
+          assert.equal((await search({ query: 'تذكرة flight' }))[0], mixed);
+          // The unstemmed singular still reaches the plural row.
+          assert.deepEqual(await search({ query: 'flight' }), [plural, mixed]);
+        },
+      );
+      await t.test(
+        'history search fallback runs only on a complete primary miss',
+        async () => {
+          const add = async (text: string, at: string) => {
+            const id = randomUUID();
+            await db.pool.query(
+              "INSERT INTO messages(id,owner_id,role,text,thread_id,created_at) VALUES($1,$2,'user',$3,$4,$5)",
+              [id, ownerId, text, freshThread, at],
+            );
+            return id;
+          };
+          const search = async (query: string) =>
+            (
+              (await personal.manage('history_search', { query })) as {
+                messages: Array<{ id: string; match?: boolean }>;
+              }
+            ).messages
+              .filter((message) => message.match !== false)
+              .map((message) => message.id);
+
+          // "aeropresscoffee" carries the substring but not the token, so the
+          // primary FTS misses it while "coffee" matches as a token.
+          const tokenHit = await add('My coffee grinder settings', '2019-10-01T10:00:00Z');
+          const substringOnly = await add('The aeropresscoffee brew guide', '2019-10-02T10:00:00Z');
+          // A primary hit returns alone: the fallback stays off, so a row that
+          // only the substring search would find is not listed.
+          assert.deepEqual(await search('coffee'), [tokenHit]);
+          // A complete primary miss fires the fallback, which finds the
+          // substring-only row.
+          assert.deepEqual(await search('aeropresscoffee'), [substringOnly]);
+        },
+      );
+      await t.test(
         'history search pages stay byte-bounded and the cursor reaches every match',
         async () => {
           const add = async (text: string, at: string) => {

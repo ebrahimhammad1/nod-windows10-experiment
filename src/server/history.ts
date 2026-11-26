@@ -125,7 +125,7 @@ export function createHistorySearch({
         ).rows[0]
       : undefined;
     if (before && !boundary) throw new Error('This history result is unavailable.');
-    const terms = `WITH terms AS (SELECT replace(plainto_tsquery('english',coalesce($2,''))::text,'&','|')::tsquery AS q,
+    const terms = `WITH terms AS (SELECT replace(plainto_tsquery('simple',coalesce($2,''))::text,'&','|')::tsquery AS q,
       coalesce((SELECT time_zone FROM preferences WHERE owner_id=$1),'UTC') AS zone)`;
     const scope = (alias: string) =>
       `${alias}.owner_id=$1 AND ${activeThreadSql(alias)}
@@ -133,9 +133,9 @@ export function createHistorySearch({
        AND ($5::date IS NULL OR (${alias}.created_at AT TIME ZONE terms.zone)::date>=$5)
        AND ($6::date IS NULL OR (${alias}.created_at AT TIME ZONE terms.zone)::date<=$6)`;
     const where = (alias: string, column: string) =>
-      `${scope(alias)} AND ($2::text IS NULL OR to_tsvector('english',${column}) @@ terms.q)`;
+      `${scope(alias)} AND ($2::text IS NULL OR to_tsvector('simple',${column}) @@ terms.q)`;
     const ordered = (alias: string, column: string) =>
-      `${query && order === 'relevance' ? `ts_rank_cd(to_tsvector('english',${column}),terms.q,1) DESC,` : ''}${alias}.created_at DESC,${alias}.id DESC`;
+      `${query && order === 'relevance' ? `ts_rank_cd(to_tsvector('simple',${column}),terms.q,1) DESC,` : ''}${alias}.created_at DESC,${alias}.id DESC`;
     const values = [
       ownerId,
       query ?? null,
@@ -144,19 +144,19 @@ export function createHistorySearch({
       from ?? null,
       to ?? null,
     ];
-    const turns = await pool.query(
+    let turns = await pool.query(
       `${terms} SELECT u.id,left(u.prompt,200) AS title,u.status,u.source,u.created_at,split_part(u.channel,':',1) AS channel
        FROM turns u CROSS JOIN terms WHERE ${where('u', 'u.prompt')} ORDER BY ${ordered('u', 'u.prompt')} LIMIT 15`,
       values,
     );
-    const page = await pool.query<HistoryMessage & { place: string; total: number }>(
+    let page = await pool.query<HistoryMessage & { place: string; total: number }>(
       `${terms}, corpus AS (
-         SELECT m.id,m.owner_id,m.turn_id,m.role,m.text,m.created_at,to_tsvector('english',m.text) AS v
+         SELECT m.id,m.owner_id,m.turn_id,m.role,m.text,m.created_at,to_tsvector('simple',m.text) AS v
          FROM messages m CROSS JOIN terms WHERE ${scope('m')} AND m.hidden_at IS NULL),
        docs AS (SELECT corpus.* FROM corpus CROSS JOIN terms WHERE ($2::text IS NULL OR corpus.v @@ terms.q)${kept('corpus')}),
        weights AS (
          SELECT w,ln(1+((SELECT count(*) FROM corpus)-count(*)+0.5)/(count(*)+0.5)) AS idf
-         FROM (SELECT DISTINCT lexeme AS w FROM unnest(tsvector_to_array(to_tsvector('english',coalesce($2,'')))) lexeme) words
+         FROM (SELECT DISTINCT lexeme AS w FROM unnest(tsvector_to_array(to_tsvector('simple',coalesce($2,'')))) lexeme) words
          JOIN docs ON docs.v @@ quote_literal(w)::tsquery GROUP BY w),
        scores AS (
          SELECT d.id,d.role,d.text,d.created_at,coalesce(sum(weights.idf),0) AS score
@@ -170,6 +170,67 @@ export function createHistorySearch({
          (SELECT count(*)::int FROM ranked) AS total FROM hits ORDER BY place`,
       [...values, cursor ?? null],
     );
+    // Substring fallback: full-text search (config 'simple') matches whole
+    // tokens, so a query word that appears only inside a larger token
+    // (plural, prefix, punctuation-joined) finds nothing. When the primary
+    // search returns no results at all, retry with per-term ILIKE matching
+    // (terms of 2+ characters, OR'ed, ranked by rarity-weighted idf like the primary search).
+    const fallbackTerms = (query ?? '')
+      .split(/\s+/)
+      .map((word) => word.trim())
+      .filter((word) => word.length >= 2)
+      .map((word) => `%${word.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`);
+    if (query && !cursor && page.rows.length === 0 && turns.rows.length === 0 && fallbackTerms.length) {
+      // Terms are passed as one array parameter ($2); each is an escaped
+      // %term% pattern. Ranking mirrors the primary search: rarity-weighted
+      // (idf) over the scoped corpus, newest first on ties.
+      const fallbackValues = [
+        ownerId,
+        fallbackTerms,
+        boundary?.at ?? null,
+        before ?? null,
+        from ?? null,
+        to ?? null,
+      ];
+      const fscope = (alias: string) =>
+        `${alias}.owner_id=$1 AND ${activeThreadSql(alias)}
+         AND ($3::timestamptz IS NULL OR (${alias}.created_at,${alias}.id)<($3,$4::uuid))
+         AND ($5::date IS NULL OR (${alias}.created_at AT TIME ZONE zone)::date>=$5)
+         AND ($6::date IS NULL OR (${alias}.created_at AT TIME ZONE zone)::date<=$6)`;
+      turns = await pool.query(
+        `WITH z AS (SELECT coalesce((SELECT time_zone FROM preferences WHERE owner_id=$1),'UTC') AS zone),
+         corpus AS MATERIALIZED (SELECT u.* FROM turns u CROSS JOIN z WHERE ${fscope('u')}),
+         terms AS (SELECT t.term FROM unnest($2::text[]) AS t(term)),
+         weights AS MATERIALIZED (
+           SELECT terms.term,ln(1+((SELECT count(*) FROM corpus)-count(*)+0.5)/(count(*)+0.5)) AS idf
+           FROM terms JOIN corpus ON corpus.prompt ILIKE terms.term ESCAPE '\' GROUP BY terms.term),
+         scored AS (
+           SELECT corpus.*,
+             (SELECT coalesce(sum(weights.idf),0) FROM weights WHERE corpus.prompt ILIKE weights.term ESCAPE '\') AS score
+           FROM corpus)
+         SELECT id,left(prompt,200) AS title,status,source,created_at,split_part(channel,':',1) AS channel
+         FROM scored WHERE score>0 ORDER BY score DESC,created_at DESC,id DESC LIMIT 15`,
+        fallbackValues,
+      );
+      page = await pool.query<HistoryMessage & { place: string; total: number }>(
+        `WITH z AS (SELECT coalesce((SELECT time_zone FROM preferences WHERE owner_id=$1),'UTC') AS zone),
+         corpus AS MATERIALIZED (SELECT m.* FROM messages m CROSS JOIN z WHERE ${fscope('m')} AND m.hidden_at IS NULL),
+         terms AS (SELECT t.term FROM unnest($2::text[]) AS t(term)),
+         weights AS MATERIALIZED (
+           SELECT terms.term,ln(1+((SELECT count(*) FROM corpus)-count(*)+0.5)/(count(*)+0.5)) AS idf
+           FROM terms JOIN corpus ON corpus.text ILIKE terms.term ESCAPE '\' GROUP BY terms.term),
+         scored AS (
+           SELECT corpus.*,
+             (SELECT coalesce(sum(weights.idf),0) FROM weights WHERE corpus.text ILIKE weights.term ESCAPE '\') AS score
+           FROM corpus),
+         ranked AS (
+           SELECT id,role,text,created_at,row_number() OVER (ORDER BY score DESC,created_at DESC,id DESC) AS place
+           FROM scored WHERE score>0)
+         SELECT id,role,left(text,6000) AS text,length(text)>6000 AS shortened,created_at,place,
+           (SELECT count(*)::int FROM ranked) AS total FROM ranked ORDER BY place LIMIT 21`,
+        fallbackValues,
+      );
+    }
     if (cursor && !page.rows.length) {
       const { rows } = await pool.query(
         `${terms} SELECT m.id FROM messages m CROSS JOIN terms WHERE ${where('m', 'm.text')} AND m.hidden_at IS NULL${kept('m')} AND m.id=$7::uuid`,
@@ -180,7 +241,7 @@ export function createHistorySearch({
     const picked = page.rows.slice(0, 20);
     const nextCursor = page.rows.length > 20 ? picked.at(-1)!.id : null;
     const { rows: messages } = await pool.query<HistoryMessage>(
-      `WITH terms AS (SELECT replace(plainto_tsquery('english',coalesce($4,''))::text,'&','|')::tsquery AS q),
+      `WITH terms AS (SELECT replace(plainto_tsquery('simple',coalesce($4,''))::text,'&','|')::tsquery AS q),
        thread AS (
          SELECT m.id,m.owner_id,m.role,m.text,m.turn_id,m.created_at,row_number() OVER (ORDER BY m.created_at,m.id) AS n
          FROM messages m WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}),
@@ -189,7 +250,7 @@ export function createHistorySearch({
          SELECT t.*,bool_or(p.id=t.id) AS match,min(p.place) AS place FROM thread t
          JOIN picked p ON t.n BETWEEN p.n-$3 AND p.n+$3 GROUP BY t.id,t.owner_id,t.role,t.text,t.turn_id,t.created_at,t.n)
        SELECT s.id,s.role,CASE WHEN length(s.text)<=1200 THEN s.text
-         ELSE ts_headline('english',s.text,terms.q,'StartSel="",StopSel="",MaxWords=60,MinWords=20,MaxFragments=3,FragmentDelimiter=" … "') END AS text,
+         ELSE ts_headline('simple',s.text,terms.q,'StartSel="",StopSel="",MaxWords=60,MinWords=20,MaxFragments=3,FragmentDelimiter=" … "') END AS text,
          length(s.text)>1200 AS shortened,s.turn_id,s.created_at,s.place,
          split_part(COALESCE(u.channel,'web'),':',1) AS channel,s.match
        FROM shown s CROSS JOIN terms LEFT JOIN turns u ON u.id=s.turn_id AND u.owner_id=$1

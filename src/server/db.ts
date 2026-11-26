@@ -192,8 +192,20 @@ export async function initializeDatabase() {
     DROP TABLE IF EXISTS draft_instructions;
     CREATE INDEX IF NOT EXISTS messages_turn_time ON messages(turn_id,created_at);
     CREATE INDEX IF NOT EXISTS messages_attachments ON messages USING gin (attachments jsonb_path_ops);
-    CREATE INDEX IF NOT EXISTS messages_text_search ON messages USING gin (to_tsvector('english',text));
+    CREATE INDEX IF NOT EXISTS messages_text_search ON messages USING gin (to_tsvector('simple',text));
   `);
+  // The message search index moved from the 'english' text-search config to
+  // 'simple' (language-neutral, so Arabic and other non-English text is
+  // searchable). Rebuild it once when an older install has the old config.
+  const searchIndex = await pool.query<{ def: string }>(
+    "SELECT indexdef AS def FROM pg_indexes WHERE schemaname='public' AND indexname='messages_text_search'",
+  );
+  if (searchIndex.rows[0] && !searchIndex.rows[0].def.includes("to_tsvector('simple'")) {
+    await pool.query('DROP INDEX messages_text_search');
+    await pool.query(
+      "CREATE INDEX messages_text_search ON messages USING gin (to_tsvector('simple',text))",
+    );
+  }
   await pool.query(
     `UPDATE turns SET status='cancelled',finished_at=now()
      WHERE owner_id=$1 AND source='event' AND starts_with(source_id,'activity-check:') AND status='queued'`,
