@@ -2445,7 +2445,14 @@ test('real Pi saves its user message and tool call before a side effect and reco
           timestamp: Date.now(),
           stopReason: tool ? 'toolUse' : 'stop',
           content: tool
-            ? [{ type: 'toolCall', id: 'effect-one', name: 'effect', arguments: {} }]
+            ? [
+                {
+                  type: 'toolCall',
+                  id: 'effect-one',
+                  name: 'nod_tool',
+                  arguments: { name: 'effect', args: {} },
+                },
+              ]
             : [{ type: 'text', text: 'Done' }],
           usage: {
             input: 1,
