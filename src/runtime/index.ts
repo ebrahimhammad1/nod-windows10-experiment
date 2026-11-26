@@ -1341,10 +1341,10 @@ export function createAgentRuntime(dependencies: {
             ...context,
             history: compactHistory(context.history),
             relatedConversation: undefined,
-            tasks: [],
             ...(retrievalFirst
-              ? { retrievalFirst: true, memoryBrief: undefined }
-              : { memoryBrief: context.memoryBrief && compactMemory(context.memoryBrief) }),
+              ? // The locator in the prompt already reduces tasks to id/title/status.
+                { retrievalFirst: true, memoryBrief: undefined }
+              : { tasks: [], memoryBrief: context.memoryBrief && compactMemory(context.memoryBrief) }),
           }
         : retrievalFirst
           ? {
