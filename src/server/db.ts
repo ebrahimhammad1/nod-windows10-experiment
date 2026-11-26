@@ -59,6 +59,27 @@ export async function cancellationTransaction<T>(
 export async function initializeDatabase() {
   if (!databaseUrl)
     throw new Error('Run pnpm run dev to configure the local database, or set DATABASE_URL.');
+  // Serialize the whole one-time init across instances booting against the
+  // same database. Concurrent boots otherwise interleave the DDL batch and
+  // deadlock: CREATE UNIQUE INDEX IF NOT EXISTS takes a SHARE lock on the
+  // table and ALTER TABLE ADD COLUMN IF NOT EXISTS wants ACCESS EXCLUSIVE, so
+  // two sessions each holding SHARE while waiting for ACCESS EXCLUSIVE
+  // deadlock (40P01) and the losing instance crashes at startup. Measured
+  // with two real servers booting simultaneously on one database. Session-
+  // level lock on a dedicated client; the init body keeps using the pool.
+  const initClient = await pool.connect();
+  let initLocked = false;
+  try {
+    await initClient.query('SELECT pg_advisory_lock(727401)');
+    initLocked = true;
+    await initializeDatabaseInner();
+  } finally {
+    if (initLocked) await initClient.query('SELECT pg_advisory_unlock(727401)');
+    initClient.release();
+  }
+}
+
+async function initializeDatabaseInner() {
   await pool.query(`
     ${locksTable};
     CREATE TABLE IF NOT EXISTS threads (
@@ -197,6 +218,8 @@ export async function initializeDatabase() {
   // The message search index moved from the 'english' text-search config to
   // 'simple' (language-neutral, so Arabic and other non-English text is
   // searchable). Rebuild it once when an older install has the old config.
+  // Runs under the init-wide advisory lock, so a second booting instance
+  // waits, then sees the rebuilt index and skips.
   const searchIndex = await pool.query<{ def: string }>(
     "SELECT indexdef AS def FROM pg_indexes WHERE schemaname='public' AND indexname='messages_text_search'",
   );
