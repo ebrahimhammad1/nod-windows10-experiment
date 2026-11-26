@@ -2583,6 +2583,139 @@ async function hostSandbox(t: test.TestContext) {
   return { prefix, root, bin, calls, tools, run, workspace };
 }
 
+test('a bounded tool error keeps its error flag and a retrievable pointer, and a stop still stops the turn', async (t) => {
+  const { prefix, root, workspace } = await hostSandbox(t);
+  const marker = `synthetic-error-${randomUUID()}`;
+  const huge = `${marker}-head ${'x'.repeat(200_000)} ${marker}-tail`;
+  const runTool = (_name: string, _params: unknown, run: () => Promise<{ content: [] }>) =>
+    run();
+  const openAgent = async (
+    f: Awaited<ReturnType<typeof fixture>>,
+    execute: () => Promise<never>,
+    turns: { count: number },
+    shouldStop: () => boolean = () => false,
+  ) => {
+    const sessionRoot = join(f.directory, 'sessions');
+    const agent = createPiAgent({
+      provider: 'openai',
+      apiKey: 'fixture',
+      sessionRoot,
+      createSession: async (options) => {
+        const result = await createAgentSession(options);
+        result.session.setActiveToolsByName(result.session.getAllTools().map((tool) => tool.name));
+        result.session.agent.streamFunction = (model) => {
+          const tool = turns.count++ === 0;
+          const message: AssistantMessage = {
+            role: 'assistant',
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            timestamp: Date.now(),
+            stopReason: tool ? 'toolUse' : 'stop',
+            content: tool
+              ? [
+                  {
+                    type: 'toolCall',
+                    id: 'fail-one',
+                    name: 'nod_tool',
+                    arguments: { name: 'effect', args: {} },
+                  },
+                ]
+              : [{ type: 'text', text: 'Done' }],
+            usage: {
+              input: 1,
+              output: 1,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 2,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+          };
+          const stream = createAssistantMessageEventStream();
+          stream.push({ type: 'start', partial: message });
+          stream.push({ type: 'done', reason: tool ? 'toolUse' : 'stop', message });
+          return stream;
+        };
+        return result;
+      },
+    });
+    const session = await agent.open({
+      ...fakeExecution(f.threadId, randomUUID()),
+      systemPrompt: 'fixture',
+      workspace,
+      runTool,
+      shouldStop,
+      onEvent() {},
+      tools: [
+        {
+          name: 'effect',
+          description: 'fixture',
+          parameters: { type: 'object', properties: {} },
+          execute,
+        },
+      ],
+    });
+    return { agent, session, sessionRoot };
+  };
+
+  // A huge tool error is bounded into an error result that keeps the error
+  // flag and points at the saved full text: nothing is dropped without a
+  // retrievable pointer.
+  const f = await fixture();
+  const failedTurns = { count: 0 };
+  const failing = await openAgent(f, async () => {
+    throw new Error(huge);
+  }, failedTurns);
+  try {
+    await failing.session.prompt('synthetic user request', []);
+    assert.equal(failedTurns.count, 2);
+    const entries = await readPiSessionEntries({
+      threadId: f.threadId,
+      sessionRoot: failing.sessionRoot,
+    });
+    const results = entries.filter(
+      (entry) => entry.type === 'message' && entry.message.role === 'toolResult',
+    );
+    assert.equal(results.length, 1);
+    const result = (
+      results[0] as {
+        message: { isError?: boolean; content: Array<{ type: string; text?: string }> };
+      }
+    ).message;
+    assert.equal(result.isError, true);
+    const shown = result.content.map((part) => part.text ?? '').join('');
+    const file = shown.match(/"workspaceFile":"([^"]+)"/)![1];
+    assert.ok(file.startsWith('.nod/outputs/'));
+    const saved = await readFile(join(workspace.path, file).replace(prefix, root), 'utf8');
+    assert.ok(saved.includes(`${marker}-head`));
+    assert.ok(saved.includes(`${marker}-tail`));
+    assert.ok(saved.length >= huge.length);
+  } finally {
+    await failing.agent.dispose();
+    await f.close();
+  }
+
+  // A stop during the side effect is not an error result either: the stop
+  // propagates and the turn ends instead of continuing to another model call.
+  const f2 = await fixture();
+  const stoppedTurns = { count: 0 };
+  const stopping = await openAgent(
+    f2,
+    async () => {
+      throw new Error(huge);
+    },
+    stoppedTurns,
+    () => true,
+  );
+  try {
+    await stopping.session.prompt('synthetic user request', []).catch(() => {});
+    assert.equal(stoppedTurns.count, 1);
+  } finally {
+    await stopping.agent.dispose();
+    await f2.close();
+  }
+});
+
 test('native Pi tools run only through workspace exec on sandbox paths that do not exist on the host', async (t) => {
   const { prefix, calls, run } = await hostSandbox(t);
   assert.equal(existsSync(prefix), false);
