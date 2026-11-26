@@ -4,6 +4,7 @@ import {
   compactHistory,
   firstInstruction,
   lastTurnHistory,
+  reopenMarkerHistory,
   retrievalFirstTurn,
   systemPrompt,
 } from '../src/runtime/prompt.ts';
@@ -135,6 +136,47 @@ test('the retrieval-first recent window keeps only the last exchange plus the cu
   // First conversation turn: no prior exchange exists, nothing is dropped.
   const first = lastTurnHistory([message('user', 'current message three', 20)]);
   assert.equal(first.length, 1);
+});
+
+test('a reopened thread injects the last step markers ahead of the last exchange', () => {
+  const history = Array.from({ length: 16 }, (_, i) =>
+    message(i % 2 === 0 ? 'user' : 'assistant', `turn ${Math.floor(i / 2) + 1} ${i % 2 === 0 ? 'question' : 'answer'}`, 60 - i),
+  );
+  const reopened = reopenMarkerHistory(history);
+  const texts = reopened.map((item: any) => item.text);
+  // 8 owner turns: window keeps the last two exchanges, 5 markers, turn 1 collapses.
+  assert.equal(texts[0], 'Earlier completed steps - saved; search to read them.');
+  assert.equal(
+    texts.filter((t: string) => t.startsWith('Earlier owner request (completed):')).length,
+    5,
+  );
+  assert.ok(texts.some((t: string) => t.includes('turn 3 question')));
+  assert.ok(!texts.some((t: string) => t.includes('turn 1 question')));
+  // The recent window stays verbatim and last.
+  assert.deepEqual(texts.slice(-4), [
+    'turn 7 question',
+    'turn 7 answer',
+    'turn 8 question',
+    'turn 8 answer',
+  ]);
+  // Older assistant answers fold into the markers; none survive.
+  assert.ok(!texts.some((t: string) => /turn [1-6] answer/.test(t)));
+  // Every marker points at retrieval.
+  for (const t of texts.filter((t: string) => t.startsWith('Earlier owner request')))
+    assert.match(t, /history_search/);
+  // A resumed session is unaffected: the caller uses the plain window.
+  const resumedWindow = lastTurnHistory(compactHistory(history));
+  assert.deepEqual(
+    resumedWindow.map((item: any) => item.text),
+    ['turn 7 question', 'turn 7 answer', 'turn 8 question', 'turn 8 answer'],
+  );
+  // First turn or short history: no markers, window unchanged.
+  assert.deepEqual(
+    reopenMarkerHistory([message('user', 'current message three', 20)]).map(
+      (item: any) => item.text,
+    ),
+    ['current message three'],
+  );
 });
 
 test('the system prompt guide describes retrieval, not a digest', () => {

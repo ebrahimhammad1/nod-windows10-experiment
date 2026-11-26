@@ -130,6 +130,40 @@ export function lastTurnHistory(history: RuntimeContext['history']) {
   return history;
 }
 
+/**
+ * Reopened retrieval-first thread (fresh session, tab reopened): the window
+ * alone gives no sign of the older completed turns, so the model cannot
+ * know what to search for. Prepend the thread's last step markers - the
+ * same one-line shape the provider-side rewrite uses for the same thread:
+ * up to 5 marker lines, older turns collapsed into one fixed line, the last
+ * exchange verbatim. Originals stay in the store; history_search reads them.
+ */
+export function reopenMarkerHistory(history: RuntimeContext['history']) {
+  const windowed = lastTurnHistory(compactHistory(history));
+  const older = history.slice(0, history.length - windowed.length);
+  const ownerTurns = older.filter((item) => item.role === 'user');
+  if (!ownerTurns.length) return windowed;
+  const kept = ownerTurns.slice(-5);
+  const collapsed = ownerTurns.length - kept.length;
+  type Item = RuntimeContext['history'][number];
+  const marker = (text: string, createdAt?: Item['createdAt']) =>
+    ({ role: 'user', text, ...(createdAt ? { createdAt } : {}) }) as Item;
+  return [
+    ...(collapsed > 0
+      ? [marker('Earlier completed steps - saved; search to read them.')]
+      : []),
+    ...kept.map((item) =>
+      marker(
+        `Earlier owner request (completed): "${
+          item.text.length > 100 ? `${item.text.slice(0, 100)}…` : item.text
+        }" - the full message, its metadata and its memory evidence stay saved; read them with history_search if this turn needs them.`,
+        item.createdAt,
+      ),
+    ),
+    ...windowed,
+  ];
+}
+
 export function compactHistory(history: RuntimeContext['history']) {
   let start = history.length;
   let characters = 0;

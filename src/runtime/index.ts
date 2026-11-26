@@ -36,6 +36,7 @@ import { threadIdentity } from '../ports/thread-identity.ts';
 import {
   compactHistory,
   lastTurnHistory,
+  reopenMarkerHistory,
   compactMemory,
   compactOwnerContext,
   firstInstruction,
@@ -1363,7 +1364,9 @@ export function createAgentRuntime(dependencies: {
         ? {
             ...context,
             history: retrievalFirst
-              ? lastTurnHistory(compactHistory(context.history))
+              ? resumed
+                ? lastTurnHistory(compactHistory(context.history))
+                : reopenMarkerHistory(context.history)
               : compactHistory(context.history),
             relatedConversation: undefined,
             ...(retrievalFirst
@@ -1374,7 +1377,9 @@ export function createAgentRuntime(dependencies: {
         : retrievalFirst
           ? {
               ...context,
-              history: lastTurnHistory(compactHistory(context.history)),
+              history: resumed
+                ? lastTurnHistory(compactHistory(context.history))
+                : reopenMarkerHistory(context.history),
               memoryBrief: undefined,
               retrievalFirst: true,
               tasks: [],
