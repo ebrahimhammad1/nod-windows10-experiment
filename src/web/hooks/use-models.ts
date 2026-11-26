@@ -129,7 +129,10 @@ export function modelReady(models: ModelsResponse | null | undefined) {
       connection.status === 'connected' &&
       connection.models.some(
         (model) =>
-          model.id === models.selection?.modelId && model.efforts.includes(models.selection.effort),
+          model.id === models.selection?.modelId &&
+          (models.selection.effort === 'auto'
+            ? model.efforts.length > 0
+            : model.efforts.includes(models.selection.effort)),
       ),
   );
 }

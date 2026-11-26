@@ -8,7 +8,8 @@ import type { ModelsResponse } from '../../shared/models';
 import { ActionMenu, ActionMenuItem } from './action-menu';
 import { Button } from './ui';
 
-const effortNames: Record<ModelEffort, string> = {
+const effortNames: Record<ModelEffort | 'auto', string> = {
+  auto: 'Auto',
   off: 'Off',
   minimal: 'Minimal',
   low: 'Low',
@@ -17,6 +18,8 @@ const effortNames: Record<ModelEffort, string> = {
   xhigh: 'Extra high',
   max: 'Max',
 };
+
+const autoHint = 'Nod picks the level for each request';
 
 export function EffortPicker() {
   const models = useModels();
@@ -28,7 +31,7 @@ export function EffortPicker() {
   const efforts = model?.efforts ?? [];
   if (!selection || !model || efforts.length < 2) return null;
 
-  async function choose(effort: ModelEffort) {
+  async function choose(effort: ModelEffort | 'auto') {
     if (!selection || saving || effort === selection.effort) return;
     setSaving(true);
     setError('');
@@ -67,21 +70,34 @@ export function EffortPicker() {
         </Button>
       }
     >
-      {(close) =>
-        efforts.map((effort) => (
+      {(close) => (
+        <>
           <ActionMenuItem
-            key={effort}
-            checked={effort === selection.effort}
-            textValue={effortNames[effort] ?? effort}
+            checked={selection.effort === 'auto'}
+            textValue={`Auto - ${autoHint}`}
             onClick={() => {
               close();
-              void choose(effort);
+              void choose('auto');
             }}
           >
-            {effortNames[effort] ?? effort}
+            Auto
+            <span className="effort-picker-hint">{autoHint}</span>
           </ActionMenuItem>
-        ))
-      }
+          {efforts.map((effort) => (
+            <ActionMenuItem
+              key={effort}
+              checked={effort === selection.effort}
+              textValue={effortNames[effort] ?? effort}
+              onClick={() => {
+                close();
+                void choose(effort);
+              }}
+            >
+              {effortNames[effort] ?? effort}
+            </ActionMenuItem>
+          ))}
+        </>
+      )}
     </ActionMenu>
   );
 }
