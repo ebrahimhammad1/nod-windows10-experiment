@@ -116,6 +116,9 @@ async function openSession(
     bigThrow?: string;
     stopAfterMs?: number;
     stopAfterFirstRequest?: boolean;
+    runToolNames?: string[];
+    deferTools?: boolean;
+    hugeExec?: boolean;
   },
 ) {
   const modelId = `fixture-${randomUUID().slice(0, 8)}`;
@@ -127,12 +130,19 @@ async function openSession(
   const workspace: any = {
     path: join(sessionRoot, 'ws'),
     instructions: 'Fixture workspace only.',
-    exec: async (input: any) => ({
-      exitCode: 0,
-      stdout:
-        opts?.bigExec && String(input?.command ?? '').includes('big') ? 'x'.repeat(30_000) : 'ok',
-      stderr: '',
-    }),
+    exec: async (command: any, options: any) => {
+      const script = String(command ?? '');
+      const stdout =
+        opts?.hugeExec && script.includes('huge')
+          ? 'x'.repeat(70_000)
+          : opts?.bigExec && script.includes('big')
+            ? 'x'.repeat(30_000)
+            : 'ok';
+      // The bash tool collects output from the onData stream, not the return
+      // value; deliver the fixture payload the same way.
+      if (stdout !== 'ok') options?.onData?.(Buffer.from(stdout));
+      return { exitCode: 0, stdout, stderr: '' };
+    },
   };
   const executed: string[] = [];
   const tools = Object.values(toolDefinitions as Record<string, any>).map((def: any) => ({
@@ -199,11 +209,15 @@ async function openSession(
     turnId: randomUUID(),
     runId: randomUUID(),
     browserId: '',
+    ...(opts?.deferTools ? { deferTools: true } : {}),
     systemPrompt: systemPrompt(workspace, undefined, undefined),
     ownerContext: 'Owner context fixture.',
     tools: tools as any,
     workspace,
-    runTool: async (_n: string, _p: unknown, run: any) => run(),
+    runTool: async (_n: string, _p: unknown, run: any) => {
+      opts?.runToolNames?.push(_n);
+      return run();
+    },
     onEvent: (event: any) => events.push(event),
     shouldStop: () =>
       opts?.stopAfterFirstRequest
@@ -265,7 +279,13 @@ test('large tool results stay bounded as the conversation grows', async (t) => {
   ];
   callIndex = 0;
   REQUESTS.length = 0;
-  const { session } = await openSession(t, { bigExec: true });
+  const { session, modelId } = await openSession(t, { bigExec: true });
+  // Bounding above the raw passthrough bound (window/2 bytes) engages once a
+  // per-minute quota is learned: a 30k result exceeds a 20k ITPM quarter-cap.
+  learnRequestQuota(
+    `compatible/api_key/${modelId}`,
+    'Request too large for model `fixture-groq` on input tokens per minute (ITPM): Limit 20000, Requested 25000. Please reduce your message size.',
+  );
   await session.prompt('hi', []);
   await session.prompt('run the big listing', []);
   await session.prompt('again', []);
@@ -463,6 +483,52 @@ test('a gateway-dispatched tool result is bounded like a direct call', async (t)
   assert.ok(
     followUp.length < 30_000,
     `the follow-up request must stay small, got ${followUp.length} chars`,
+  );
+  await session.dispose();
+});
+
+test('a gateway-dispatched sandbox tool keeps the runTool wrapper, validation, and bounding', async (t) => {
+  // The all-path proof: dispatching a sandbox tool through nod_tool must go
+  // through the same runTool wrapper (approvals/permissions) and the same
+  // output bounding as a direct call, and invalid target arguments must come
+  // back as a corrective error rather than crashing the turn.
+  responders = [
+    callReply('nod_tool', { name: 'bash', args: { command: 'echo huge' } }, 'c1'),
+    callReply('nod_tool', { name: 'bash', args: {} }, 'c2'),
+    textReply('both handled'),
+  ];
+  callIndex = 0;
+  REQUESTS.length = 0;
+  const runToolNames: string[] = [];
+  const { session, modelId } = await openSession(t, { hugeExec: true, runToolNames, deferTools: true });
+  // Learn a per-minute input quota so the quarter-cap (10,000 bytes) forces
+  // the 51k sandbox result into the bounded pointer path.
+  learnRequestQuota(
+    `compatible/api_key/${modelId}`,
+    'Request too large for model `fixture-groq` on input tokens per minute (ITPM): Limit 20000, Requested 25000. Please reduce your message size.',
+  );
+  await session.prompt('run the command', []);
+  assert.equal(REQUESTS.length, 3, 'two gateway calls + answer');
+  assert.ok(runToolNames.includes('bash'), 'the gateway call passes through runTool');
+  const followUp = JSON.stringify(REQUESTS[1]);
+  assert.ok(
+    !followUp.includes('x'.repeat(1000)),
+    'a huge sandbox result through the gateway is bounded like a direct call',
+  );
+  assert.ok(
+    followUp.includes('workspaceFile') || followUp.includes('.nod/outputs'),
+    'the bounded gateway result keeps a retrievable pointer',
+  );
+  const afterInvalid = JSON.stringify(REQUESTS[2]);
+  assert.match(
+    afterInvalid,
+    /Invalid arguments for tool \\"bash\\"/,
+    'invalid target arguments get the same corrective validation error as a direct call',
+  );
+  assert.match(afterInvalid, /command/);
+  assert.ok(
+    !afterInvalid.includes('Cannot read properties of undefined'),
+    'no opaque crash from unchecked gateway arguments',
   );
   await session.dispose();
 });
