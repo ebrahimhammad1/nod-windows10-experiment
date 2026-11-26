@@ -113,17 +113,29 @@ function rootObject<P extends TSchema>(schema: P): P {
           variants.findIndex((other) => JSON.stringify(other) === JSON.stringify(variant)) ===
           index,
       );
+      const advertised = required.has(key)
+        ? distinct
+        : distinct.map((variant) => {
+            // Keys only some actions use are advertised without minLength: models
+            // tend to fill every listed property with empty strings, and a
+            // minLength here rejects that filler before the strict per-action
+            // check can sort it out, forcing paid retry calls.
+            const { minLength: _minLength, ...rest } = variant as TSchema & {
+              minLength?: number;
+            };
+            return rest;
+          });
       const value =
-        distinct.length === 1
-          ? distinct[0]
+        advertised.length === 1
+          ? advertised[0]
           : Type.Union(
-              distinct,
-              distinct.every(
+              advertised,
+              advertised.every(
                 (variant) =>
                   typeof variant.const === 'string' &&
                   Object.keys(variant).every((key) => key === 'type' || key === 'const'),
               )
-                ? { enum: [...new Set(distinct.map((v) => v.const))] }
+                ? { enum: [...new Set(advertised.map((v) => v.const))] }
                 : {},
             );
       return [key, required.has(key) ? value : Type.Optional(value)];
@@ -753,14 +765,32 @@ function bind<P extends TSchema>(
                 ),
               )
               .find((matches) => matches?.length === 1)?.[0] ?? strict;
-          if (!Value.Check(selected, params)) {
-            const errors = [...Value.Errors(selected, params)]
+          let candidate = params;
+          if (selected !== strict) {
+            // Once the discriminator picks one action, drop empty-string filler
+            // for fields that belong to other actions; models add that filler
+            // because the flattened advertisement lists every field. Real values
+            // for other actions stay, so the strict check still rejects them.
+            const allowed = new Set(
+              Object.keys((selected as ObjectSchema).properties ?? {}),
+            );
+            const memberRequired = new Set((selected as ObjectSchema).required ?? []);
+            candidate = Object.fromEntries(
+              Object.entries(params as Record<string, unknown>).filter(([key, value]) => {
+                const empty = value === '' || value === undefined || value === null;
+                if (!empty) return true;
+                return allowed.has(key) && memberRequired.has(key);
+              }),
+            ) as Static<P>;
+          }
+          if (!Value.Check(selected, candidate)) {
+            const errors = [...Value.Errors(selected, candidate)]
               .slice(0, 8)
               .map((error) => `${error.path || '/'}: ${error.message}`)
               .join('; ');
             throw new Error(`Invalid ${tool.name} input: ${errors}. Valid forms: ${forms}.`);
           }
-          return execute(params);
+          return execute(candidate);
         }
       : execute,
   } as NodTool;

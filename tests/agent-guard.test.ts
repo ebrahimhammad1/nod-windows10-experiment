@@ -1634,6 +1634,37 @@ test('skill actions keep their required fields and refuse fields from other acti
   );
 });
 
+test('skill calls tolerate empty filler fields the flattened schema invites', async () => {
+  const managed: Array<{ action: string; args: unknown }> = [];
+  await fixture(
+    async (tools) => {
+      const skill = tools.get('skills')!;
+      const call = (args: Record<string, string>) =>
+        skill.execute(
+          validateToolArguments(skill, {
+            type: 'toolCall',
+            id: randomUUID(),
+            name: skill.name,
+            arguments: args,
+          }),
+        );
+      const filler = { name: '', file: '', description: '', body: '', old: '', new: '' };
+      await call({ action: 'list', ...filler });
+      await call({ action: 'read', ...filler, name: 'schedules-and-watches' });
+      assert.equal(managed.length, 0);
+      await assert.rejects(call({ action: 'list', ...filler, body: 'real content' }), /Invalid skills input/);
+      await assert.rejects(call({ action: 'save', ...filler }), /Invalid skills input/);
+      assert.equal(managed.length, 0);
+    },
+    {
+      manage: async (action, args) => {
+        managed.push({ action, args });
+        return { saved: true };
+      },
+    },
+  );
+});
+
 test('skill reads cannot escape the trusted library or load workspace instructions', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-skills-'));
   const root = join(directory, 'trusted');
