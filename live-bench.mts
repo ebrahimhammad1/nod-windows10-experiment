@@ -119,4 +119,4 @@ async function run(mode: 'CURRENT' | 'MINIMAL', promptText: string) {
 }
 
 const mode1 = (process.argv[2] ?? 'MINIMAL') as 'CURRENT' | 'MINIMAL';
-await run(mode1, 'hi');
+await run(mode1, process.argv[3] ?? 'hi');

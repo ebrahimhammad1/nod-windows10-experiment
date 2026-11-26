@@ -108,3 +108,4 @@ export function quotaPreflightError(
     `Nod did not send this request: it is roughly ${estimate.toLocaleString('en-US')} tokens (an estimate; the provider counts exactly) and this connection reported a limit of ${quota.limit.toLocaleString('en-US')} input tokens per minute ${Math.round((now - quota.at) / 60000)} minutes ago. Choose a model or connection with a higher limit, or shorten the conversation. The connection is re-checked automatically every few minutes and whenever its provider reports a different limit.`,
   );
 }
+

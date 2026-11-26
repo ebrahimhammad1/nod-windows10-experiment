@@ -58,6 +58,19 @@ const groq413 = () => () =>
     { status: 413, headers: { 'content-type': 'application/json' } },
   );
 
+const groq429 = () => () =>
+  new Response(
+    JSON.stringify({
+      error: {
+        message:
+          'Rate limit reached for model `fixture-groq` in organization `fixture` on input tokens per minute (ITPM): Limit 7000, Used 3932, Requested 4074. Please try again in 8.61s.',
+        type: 'tokens',
+        code: 'rate_limit_exceeded',
+      },
+    }),
+    { status: 429, headers: { 'content-type': 'application/json' } },
+  );
+
 (globalThis as any).fetch = async (_url: any, init: any) => {
   const body = typeof init?.body === 'string' ? init.body : '';
   let parsed: any = null;
@@ -244,6 +257,26 @@ test('large tool results stay bounded as the conversation grows', async (t) => {
   assert.ok(
     last - first < 10_000,
     `request grew by ${last - first} bytes across two 30k tool results`,
+  );
+  await session.dispose();
+});
+
+test('a 429 per-minute rejection retries once after a paced delay, then completes', async (t) => {
+  responders = [groq429(), textReply('after the wait')];
+  callIndex = 0;
+  REQUESTS.length = 0;
+  const { session, events } = await openSession(t);
+  const started = Date.now();
+  await session.prompt('hi', []);
+  const waited = Date.now() - started;
+  assert.equal(REQUESTS.length, 2, 'the paced retry resends the same request once');
+  assert.ok(
+    waited >= 9_000,
+    `the retry must wait out the provider window, waited ${waited}ms`,
+  );
+  assert.ok(
+    events.some((event) => event.type === 'retry'),
+    `the retry must be visible, got: ${JSON.stringify(events.map((e) => e.type))}`,
   );
   await session.dispose();
 });
