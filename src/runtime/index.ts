@@ -38,9 +38,8 @@ import {
   compactMemory,
   compactOwnerContext,
   firstInstruction,
-  lightTurn,
+  retrievalFirstTurn,
   observerInstruction,
-  rollingHistory,
   scheduledInstruction,
   ownerContext,
   steeredInstruction,
@@ -736,17 +735,15 @@ export function createAgentRuntime(dependencies: {
         completed = screened = true;
         return { status };
       }
-      // Light turns skip the model-based memory selection (its 1-2 aux
-      // calls would dwarf a simple message). The lightTurn gate is
-      // conservative - any back-reference marker forces the full path - but
-      // a short unmarked message that still needs a saved fact classifies
-      // light; memory stays reachable through the memory tools via the
-      // nod_tool gateway in that case.
+      // Retrieval-first conversation turns skip the model-based memory
+      // selection (its 1-2 aux calls would dwarf an ordinary message, in
+      // BOTH context modes); saved facts stay reachable on demand through
+      // memory_find/memory_read via the nod_tool gateway.
       if (
         dependencies.prepareMemory &&
         !overBudget() &&
         !context.spendingLimitReached &&
-        !lightTurn(context)
+        !retrievalFirstTurn(context)
       ) {
         context.memoryBrief = await untilAborted(
           dependencies.prepareMemory(
@@ -1331,14 +1328,13 @@ export function createAgentRuntime(dependencies: {
       signal.throwIfAborted();
       const resumed = session.resumed;
       const compact = session.compactContext === true;
-      // Light turn (structural heuristic, not semantic understanding): a
-      // short, structurally simple conversation message with no
-      // back-reference markers gets rolling history (recent window + bounded
-      // extractive digest of older messages, originals recoverable via
-      // history_search) and skips the memory-selection request. Tools need
-      // no light variant: they are already just-in-time via nod_tool.
-      const light = !compact && lightTurn(context);
-      const rolled = light ? rollingHistory(context.history) : undefined;
+      // Retrieval-first conversation turn (the owner-steered design: send
+      // the message with a minimal bootstrap; the model decides what it
+      // needs and retrieves it). Applies in BOTH context modes; task,
+      // background, proactive, scheduled, attachment, sign-in and
+      // failed-turn continuations keep the full context. Tools need no
+      // variant: they are already just-in-time via nod_tool.
+      const retrievalFirst = retrievalFirstTurn(context);
       const { images, omitted, analysis } = await inline(context.attachments, context.prompt);
       const requestContext = compact
         ? {
@@ -1346,16 +1342,16 @@ export function createAgentRuntime(dependencies: {
             history: compactHistory(context.history),
             relatedConversation: undefined,
             tasks: [],
-            memoryBrief: context.memoryBrief && compactMemory(context.memoryBrief),
+            ...(retrievalFirst
+              ? { retrievalFirst: true, memoryBrief: undefined }
+              : { memoryBrief: context.memoryBrief && compactMemory(context.memoryBrief) }),
           }
-        : rolled
+        : retrievalFirst
           ? {
               ...context,
-              history: rolled.recent,
+              history: compactHistory(context.history),
               memoryBrief: undefined,
-              ...(rolled.digest
-                ? { historyDigest: rolled.digest, historyDigestOmitted: rolled.omitted }
-                : {}),
+              retrievalFirst: true,
             }
           : context;
       const observer = context.proactivity

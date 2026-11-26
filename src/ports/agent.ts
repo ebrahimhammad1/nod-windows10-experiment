@@ -175,8 +175,9 @@ export interface RuntimeContext {
   memoryBrief?: MemoryBrief;
   // Light-turn rolling history: a shortened digest of the older messages
   // dropped from recentConversation (originals recoverable via history_search).
-  historyDigest?: string;
-  historyDigestOmitted?: number;
+  // Retrieval-first conversation turn: only the recent window was injected;
+  // earlier messages, memory and work details load on demand via tools.
+  retrievalFirst?: boolean;
   learnedSkills?: Array<{ name: string; description: string }>;
   checkIn?: { budgetUsd: number; spentUsd: number; planUsd?: number };
   spendingLimitReached?: { monthlyUsd: number };
