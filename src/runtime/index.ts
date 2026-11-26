@@ -38,7 +38,9 @@ import {
   compactMemory,
   compactOwnerContext,
   firstInstruction,
+  lightTurn,
   observerInstruction,
+  rollingHistory,
   scheduledInstruction,
   ownerContext,
   steeredInstruction,
@@ -734,7 +736,15 @@ export function createAgentRuntime(dependencies: {
         completed = screened = true;
         return { status };
       }
-      if (dependencies.prepareMemory && !overBudget() && !context.spendingLimitReached) {
+      // Light turns skip the model-based memory selection (its 1-2 aux
+      // calls would dwarf a simple message); memory stays reachable through
+      // the memory tools via the nod_tool gateway.
+      if (
+        dependencies.prepareMemory &&
+        !overBudget() &&
+        !context.spendingLimitReached &&
+        !lightTurn(context)
+      ) {
         context.memoryBrief = await untilAborted(
           dependencies.prepareMemory(
             context,
@@ -1318,6 +1328,13 @@ export function createAgentRuntime(dependencies: {
       signal.throwIfAborted();
       const resumed = session.resumed;
       const compact = session.compactContext === true;
+      // Light turn (structural heuristic, not semantic understanding): a
+      // short, structurally simple conversation message gets rolling history
+      // (recent window + bounded digest of older messages, originals
+      // recoverable via history_search) and gateway-only tools.
+      const light = !compact && lightTurn(context);
+      session.setLightTurn?.(light);
+      const rolled = light ? rollingHistory(context.history) : undefined;
       const { images, omitted, analysis } = await inline(context.attachments, context.prompt);
       const requestContext = compact
         ? {
@@ -1327,7 +1344,16 @@ export function createAgentRuntime(dependencies: {
             tasks: [],
             memoryBrief: context.memoryBrief && compactMemory(context.memoryBrief),
           }
-        : context;
+        : rolled
+          ? {
+              ...context,
+              history: rolled.recent,
+              memoryBrief: undefined,
+              ...(rolled.digest
+                ? { historyDigest: rolled.digest, historyDigestOmitted: rolled.omitted }
+                : {}),
+            }
+          : context;
       const observer = context.proactivity
         ? observerInstruction(
             requestContext,

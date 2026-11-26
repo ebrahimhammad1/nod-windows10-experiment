@@ -173,6 +173,10 @@ export interface RuntimeContext {
   };
   memory?: string;
   memoryBrief?: MemoryBrief;
+  // Light-turn rolling history: a shortened digest of the older messages
+  // dropped from recentConversation (originals recoverable via history_search).
+  historyDigest?: string;
+  historyDigestOmitted?: number;
   learnedSkills?: Array<{ name: string; description: string }>;
   checkIn?: { budgetUsd: number; spentUsd: number; planUsd?: number };
   spendingLimitReached?: { monthlyUsd: number };
@@ -406,6 +410,9 @@ export interface AgentSession {
   readsImages?: boolean;
   readsAudio?: boolean;
   compactContext?: boolean;
+  // Restrict this turn's active tools to the gateway-only light set (every
+  // capability stays reachable just-in-time through nod_tool). Per turn.
+  setLightTurn?(light: boolean): void;
   prompt(
     text: string,
     images: AgentImage[],
