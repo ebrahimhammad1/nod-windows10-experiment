@@ -10059,7 +10059,7 @@ test('a spilled tool output points at its file and the optional script path', as
   assert.ok(spilled.workspaceFile.endsWith('.txt'));
   assert.ok(spilled.preview.length < 1000);
   assert.ok(spilled.tail.length > 0);
-  assert.ok(spilled.process.includes('small script over workspaceFile'));
+  assert.ok(spilled.process.includes('small script over the saved file'));
   assert.ok(spilled.process.includes('sandbox tools'));
   // An output that fits its preview is returned whole, with no script nudge.
   const fits = JSON.parse(await output.save([{ type: 'text' as const, text: 'short' }], 1000));

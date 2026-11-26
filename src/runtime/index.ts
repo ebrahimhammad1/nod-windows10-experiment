@@ -906,9 +906,29 @@ export function createAgentRuntime(dependencies: {
               },
             };
           });
+      // Terse output (optional owner setting, default off): always terses
+      // replies sent to external messages through tools; terses the whole
+      // answer only when the owner also selected a lower thinking level for
+      // the turn ('high' is the default level; 'auto' resolves per request
+      // and is not a lower selection).
+      const lowerSelectedEffort =
+        context.model?.effort !== 'auto' &&
+        ['off', 'minimal', 'low', 'medium'].includes(context.model?.effort ?? '');
+      const terse = context.terseOutput
+        ? lowerSelectedEffort
+          ? ('all' as const)
+          : ('external' as const)
+        : undefined;
       const system =
         context.proactivity?.instructions ??
-        systemPrompt(workspace, dependencies.skills, context.taskContext, context.background);
+        systemPrompt(
+          workspace,
+          dependencies.skills,
+          context.taskContext,
+          context.background,
+          false,
+          terse,
+        );
       const compactInstructions = {
         systemPrompt:
           context.proactivity?.instructions ??
@@ -918,6 +938,7 @@ export function createAgentRuntime(dependencies: {
             context.taskContext,
             context.background,
             true,
+            terse,
           ),
         ownerContext: compactOwnerContext(context),
       };

@@ -184,6 +184,7 @@ export async function initializeDatabase() {
     ALTER TABLE preferences ALTER COLUMN proactive_paused SET DEFAULT true;
     ALTER TABLE preferences ADD COLUMN IF NOT EXISTS local_keep_out text[] NOT NULL DEFAULT '{}';
     ALTER TABLE preferences ADD COLUMN IF NOT EXISTS local_files_enabled boolean NOT NULL DEFAULT false;
+    ALTER TABLE preferences ADD COLUMN IF NOT EXISTS terse_output boolean NOT NULL DEFAULT false;
     ALTER TABLE preferences ADD COLUMN IF NOT EXISTS computer_use boolean NOT NULL DEFAULT false;
     ALTER TABLE preferences ADD COLUMN IF NOT EXISTS computer_keep_out text[] NOT NULL DEFAULT '{}';
     CREATE INDEX IF NOT EXISTS messages_owner_time ON messages(owner_id,created_at);

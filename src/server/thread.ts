@@ -1967,7 +1967,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       [ownerId, turn.session_id, turn.id],
     ),
     pool.query(
-      'SELECT time_zone,locale,hour_cycle,notification_rule,rules,quiet_hours_enabled,quiet_start,quiet_end,computer_use FROM preferences WHERE owner_id=$1',
+      'SELECT time_zone,locale,hour_cycle,notification_rule,rules,quiet_hours_enabled,quiet_start,quiet_end,computer_use,terse_output FROM preferences WHERE owner_id=$1',
       [ownerId],
     ),
     dependencies.accountProfile?.().catch(() => undefined),
@@ -2014,6 +2014,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       locale: preference?.locale || formattingLocale(timeZone ? timeZoneRegion(timeZone) : null),
       hourCycle: preference?.hour_cycle || defaultPreferences.hourCycle,
       notificationRule: preference?.notification_rule ?? defaultPreferences.notificationRule,
+      ...(preference?.terse_output ? { terseOutput: true as const } : {}),
       rules: preference?.rules ?? defaultPreferences.rules,
       quietHours: isQuietTime({
         ...defaultPreferences,

@@ -63,3 +63,24 @@ test('headless is measurably smaller in every mode', () => {
     console.log(`compact=${compact}: default ${base} B -> headless ${headless} B (saved ${base - headless} B)`);
   }
 });
+
+test('terse output adds its line only when enabled and scopes it to the level', () => {
+  const plain = systemPrompt(workspace, undefined, undefined, false, true);
+  assert.doesNotMatch(plain, /terse output/);
+  const external = systemPrompt(workspace, undefined, undefined, false, true, 'external');
+  assert.match(external, /The owner turned on terse output: keep replies sent to external messages/);
+  assert.match(external, /Answers in this conversation stay as they are/);
+  assert.doesNotMatch(external, /keep the whole reply as short/);
+  const all = systemPrompt(workspace, undefined, undefined, false, true, 'all');
+  assert.match(all, /chose a lower thinking level: keep the whole reply as short as a complete answer allows/);
+  // Everything else is untouched.
+  assert.equal(external.replace(/The owner turned on terse output[^\n]*\n/, ''), plain);
+  assert.equal(all.replace(/The owner turned on terse output[^\n]*\n/, ''), plain);
+});
+
+test('the terse-output preference is off by default and validates as a boolean', async () => {
+  const { defaultPreferences, validatePreferences } = await import('../src/server/preferences.ts');
+  assert.equal(defaultPreferences.terseOutput, false);
+  assert.deepEqual(validatePreferences({ terseOutput: true }), { terseOutput: true });
+  assert.throws(() => validatePreferences({ terseOutput: 'yes' }));
+});

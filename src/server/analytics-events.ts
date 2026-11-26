@@ -275,6 +275,7 @@ export const analyticsEvent = z.discriminatedUnion('event', [
             'quiet_end',
             'proactivity_paused',
             'local_files_access',
+            'terse_output',
             'memory_enabled',
             'memory_sensitive',
             'monthly_spending_limit',

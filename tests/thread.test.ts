@@ -1742,6 +1742,16 @@ test(
             await preferences.update({ quietHoursEnabled: false });
             assert.equal((await preferences.get()).speechVoice, 'kokoro:bf_emma');
             assert.equal((await preferences.get()).proactivePaused, false);
+            // Terse output is off by default, persists independently, and
+            // survives unrelated preference updates.
+            assert.equal((await preferences.get()).terseOutput, false);
+            await preferences.update({ terseOutput: true });
+            assert.equal((await preferences.get()).terseOutput, true);
+            assert.equal((await preferences.get()).speechVoice, 'kokoro:bf_emma');
+            await preferences.update({ speechReply: 'voice' });
+            assert.equal((await preferences.get()).terseOutput, true);
+            assert.equal((await foreign.get()).terseOutput, false);
+            await preferences.update({ speechReply: 'auto' });
             await assert.rejects(
               preferences.update({ speechVoice: 'https://foreign.example/voice' }),
             );

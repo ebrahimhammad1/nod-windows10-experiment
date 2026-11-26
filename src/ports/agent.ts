@@ -133,6 +133,10 @@ export interface RuntimeContext {
   hourCycle?: 'auto' | 'h12' | 'h23';
   notificationRule?: string;
   rules?: string;
+  // Optional owner setting (preferences.terse_output, default off): terse
+  // style for external tool-result replies, and for the whole answer when
+  // the owner also selected a lower thinking level for the turn.
+  terseOutput?: boolean;
   quietHours?: boolean;
   account?: RuntimeAccount;
   connectedApps?: ConnectedApp[];
