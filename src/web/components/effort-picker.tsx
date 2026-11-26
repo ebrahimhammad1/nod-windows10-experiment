@@ -82,8 +82,10 @@ export function EffortPicker() {
               void choose('auto');
             }}
           >
-            Auto
-            <span className="effort-picker-hint">{autoHint}</span>
+            <span>
+              Auto
+              <small>{autoHint}</small>
+            </span>
           </ActionMenuItem>
           {efforts.map((effort) => (
             <ActionMenuItem
