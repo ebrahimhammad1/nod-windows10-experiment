@@ -1030,6 +1030,7 @@ export function createPiAgent(options: {
       // architecture: definitions never ride the request unless retrieved.
       const zeroLoadout =
         process.env.NOD_TOOL_LOADOUT === 'zero' && !input.restricted && !budget.compact;
+      const sandboxNames = new Set(sandboxTools.map((tool) => tool.name));
       const compactTools = [
         ...sandboxTools.map((tool) => tool.name),
         'nod_tool_search',
@@ -1168,6 +1169,27 @@ export function createPiAgent(options: {
             throw new Error(
               `nod_tool calls load-on-demand tools by name; "${String(name)}" is not one. Use nod_tool_search to find loadable tools.`,
             );
+          // The loop validates only nod_tool's own arguments, so a gateway
+          // call would reach the target with unchecked args (an empty {}
+          // crashed bash with 'Cannot read properties of undefined'). Nod
+          // app tools validate inside execute (bind) exactly as on a direct
+          // call; sandbox tools rely on the loop's schema validation, which
+          // the gateway bypasses - restore it for them with the same
+          // corrective error shape a direct call gets.
+          const forwardedArgs = (forwarded ?? {}) as Record<string, unknown>;
+          if (sandboxNames.has(target.name)) {
+            const checked = Compile(toolSchema(target.parameters));
+            if (!checked.Check(structuredClone(forwardedArgs))) {
+              const errors = checked
+                .Errors(forwardedArgs)
+                .slice(0, 5)
+                .map((error) => `  - ${error.instancePath || '/'}: ${error.message}`)
+                .join('\n');
+              throw new Error(
+                `Invalid arguments for tool "${target.name}":\n${errors}\nCorrect the arguments and call the tool again.`,
+              );
+            }
+          }
           // Gateway-dispatched tools must pass the same output bounding as
           // direct calls: an unbounded result (a full memory read is ~7k
           // tokens on its own) re-inflates the very next request past the
@@ -1175,7 +1197,7 @@ export function createPiAgent(options: {
           // on a 7,000 ITPM connection.
           return boundedOutput(
             target.name,
-            () => target.execute(id, (forwarded ?? {}) as never, signal, onUpdate, context),
+            () => target.execute(id, forwardedArgs as never, signal, onUpdate, context),
             signal,
           );
         },
