@@ -78,7 +78,8 @@ test('a retrieval-first request injects only the recent window plus a retrieval 
     new Set(),
   );
   assert.match(light, /notInjected/);
-  assert.match(light, /history_search \{query,around\} reads complete original earlier messages/);
+  assert.match(light, /history_search \{query,around\} reads complete original messages/);
+  assert.match(light, /docs_search reads Nod guides/);
   assert.match(light, /memory_find reads saved facts/);
   assert.match(light, /task list reads open work/);
   // No digest or summary of dropped messages anywhere.

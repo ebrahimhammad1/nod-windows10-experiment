@@ -337,12 +337,14 @@ function requestParts(
         }
       : {}),
     recentConversation,
-    // Retrieval-first turns carry ONLY this locator for what was not
-    // injected; retrieval returns complete originals, never summaries.
+    // Retrieval-first turns carry ONLY these two navigation lines for what
+    // was not injected (the owner's design: one line points at the
+    // tasks/instructions store, one at earlier conversation); retrieval
+    // returns complete originals, never summaries.
     ...(context.retrievalFirst
       ? {
           notInjected:
-            'Earlier conversation, saved memory and open-work details are not in this request. history_search {query,around} reads complete original earlier messages; memory_find reads saved facts; task list reads open work. Retrieve before answering or acting on anything not in this request.',
+            'Tasks, instructions and saved memory are not in this request: the task list reads open work, memory_find reads saved facts, docs_search reads Nod guides. Earlier conversation is not in this request: history_search {query,around} reads complete original messages at the point you need. Retrieve before answering or acting on anything not in this request.',
         }
       : {}),
     ...(context.relatedConversation?.length
