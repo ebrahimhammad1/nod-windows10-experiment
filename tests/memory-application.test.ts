@@ -2326,3 +2326,52 @@ test('updates email keeps fixed answers scoped to each submission across route i
   assert.equal((await signup(personalBusiness)).statusCode, 200);
   assert.deepEqual(sent[2], personalBusiness);
 });
+
+test('memory_read windows long notes by bytes with exact continuation and a bounded envelope', async () => {
+  const { modelContext } = await import('../src/providers/pi/context.ts');
+  // The 6,000 B envelope fits each mode's per-tool output budget even when
+  // the turn splits it across two tool calls.
+  for (const contextWindow of [32_768, 131_072]) {
+    const budget = modelContext({
+      provider: 'mock',
+      id: 'mock-model',
+      contextWindow,
+      maxTokens: 8192,
+    });
+    assert.ok(budget.toolOutput.maxBytes / 2 >= 6000, `window ${contextWindow}`);
+  }
+  const memory = createMemoryService({
+    pool: { query: async () => ({ rows: [] }) } as unknown as pg.Pool,
+    ownerId: 'windowed-read-owner',
+    store: memoryObjectStore(),
+  });
+  // Arabic is two bytes per char: 3,534 chars is ~7 KB, past the byte budget
+  // while under the 4,000-char note schema limit.
+  const text = `القرار النهائي: الحجز في الهيلتون. ${'س'.repeat(3500)}`;
+  const path = await memory.add({ area: 'about', text });
+  type ReadPage = {
+    text: string;
+    shortened?: boolean;
+    textLength?: number;
+    nextOffset?: number;
+  };
+  const windows: string[] = [];
+  let offset: number | undefined;
+  for (let page = 0; ; page++) {
+    const result = (await memory.read({
+      path,
+      ...(offset === undefined ? {} : { offset }),
+    })) as ReadPage;
+    const envelope = Buffer.byteLength(JSON.stringify(result));
+    assert.ok(envelope <= 6000, `page ${page} envelope is ${envelope} B`);
+    assert.equal(result.textLength, text.length);
+    assert.equal(result.shortened, result.nextOffset !== undefined);
+    windows.push(result.text);
+    if (result.nextOffset === undefined) break;
+    offset = result.nextOffset;
+    assert.ok(page < 10, 'window walk did not terminate');
+  }
+  assert.ok(windows.length >= 2, 'a ~7 KB note must page');
+  assert.equal(windows.join(''), text);
+  assert.match(windows.join(''), /الهيلتون/);
+});

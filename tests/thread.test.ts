@@ -8363,6 +8363,59 @@ test(
           assert.ok(crowdedBytes <= 6000, `window page carries ${crowdedBytes} text bytes`);
           assert.equal(crowded.contextComplete, false);
           assert.ok(crowded.messages.some(({ id }) => id === cluster[5]));
+          // A dropped context row stays exactly retrievable: reading around
+          // the nearest kept row on that side returns it.
+          const keptIds = new Set(crowded.messages.map(({ id }) => id));
+          const droppedBefore = cluster.slice(0, 5).filter((id) => !keptIds.has(id));
+          assert.ok(droppedBefore.length > 0, 'expected farthest context rows to drop');
+          const nearestKept = cluster.slice(0, 5).find((id) => keptIds.has(id))!;
+          const widened = (await personal.manage('history_search', {
+            around: nearestKept,
+          })) as { messages: Array<{ id: string }> };
+          for (const id of droppedBefore)
+            assert.ok(
+              widened.messages.some((message) => message.id === id),
+              `dropped context row ${id} not recoverable around its neighbour`,
+            );
+          // Omitted turn titles page exactly: before=<last listed turn id>
+          // continues the bounded list until every matching turn was shown.
+          const turnIds: string[] = [];
+          for (let index = 0; index < 15; index++) {
+            const id = randomUUID();
+            await db.pool.query(
+              "INSERT INTO turns(id,owner_id,thread_id,session_id,prompt,source,status,created_at) VALUES($1,$2,$3,$3,$4,'user','succeeded',$5)",
+              [
+                id,
+                ownerId,
+                freshThread,
+                `turntitle ${index} ${'x'.repeat(170)}`,
+                `2019-08-01T10:${String(index).padStart(2, '0')}:00Z`,
+              ],
+            );
+            turnIds.push(id);
+          }
+          type TurnPage = { turns: Array<{ id: string }>; turnsTruncated?: number };
+          const shownTurns = new Set<string>();
+          let turnBoundary: string | undefined;
+          let truncatedSeen = false;
+          for (let page = 0; ; page++) {
+            const turnPage = (await personal.manage('history_search', {
+              from: '2019-08-01',
+              to: '2019-08-01',
+              ...(turnBoundary ? { before: turnBoundary } : {}),
+            })) as TurnPage;
+            if (turnPage.turnsTruncated) truncatedSeen = true;
+            for (const turn of turnPage.turns) {
+              assert.ok(!shownTurns.has(turn.id), `turn ${turn.id} listed twice`);
+              shownTurns.add(turn.id);
+            }
+            if (!turnPage.turnsTruncated) break;
+            turnBoundary = turnPage.turns.at(-1)!.id;
+            assert.ok(page < 5, 'turn-title continuation did not terminate');
+          }
+          assert.ok(truncatedSeen, 'expected the 1.5 KB title budget to engage');
+          for (const id of turnIds)
+            assert.ok(shownTurns.has(id), `turn ${id} never listed`);
           const historyTurn = randomUUID();
           await db.pool.query(
             "INSERT INTO turns(id,owner_id,thread_id,session_id,prompt,source,status,created_at) VALUES($1,$2,$3,$3,'Synthetic history turn lookup','user','succeeded','2019-04-01T10:00:00Z')",

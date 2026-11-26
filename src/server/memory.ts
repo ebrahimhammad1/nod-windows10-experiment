@@ -39,7 +39,23 @@ const key = 'memory/MEMORY.md';
 const nilId = '00000000-0000-0000-0000-000000000000';
 const flat = (value: string) => value.replace(/\s+/g, ' ').trim();
 const findInput = z.object({ query: z.string().trim().min(1), area: area.optional() }).strict();
-const readInput = z.object({ path: z.union([area, path]) }).strict();
+const readInput = z
+  .object({ path: z.union([area, path]), offset: z.number().int().min(0).optional() })
+  .strict();
+
+// Largest code-point-safe window of text starting at `start` (a UTF-16
+// offset) within maxBytes; next is the continuation offset when text remains.
+const byteWindow = (text: string, start: number, maxBytes: number) => {
+  let end = start;
+  let bytes = 0;
+  for (const ch of text.slice(start)) {
+    const size = Buffer.byteLength(ch);
+    if (bytes + size > maxBytes && end > start) break;
+    bytes += size;
+    end += ch.length;
+  }
+  return { text: text.slice(start, end), next: end < text.length ? end : null };
+};
 const noteInput = z.object({ area, text: lines(), expires: z.iso.date().optional() }).strict();
 const importInput = z
   .object({ notes: z.array(z.object({ area, text: z.string() }).strict()) })
@@ -487,22 +503,51 @@ export function createMemoryService(options: {
     },
     read: async (raw: unknown) => {
       const { tree } = await load();
-      const result = open(tree, readInput.parse(raw).path);
+      const input = readInput.parse(raw);
+      const result = open(tree, input.path);
       if (!('sources' in result)) return result;
       const quote = locate(tree, result.path)?.quote;
       const found = await sources(result.sources);
+      const mapped = result.sources.map((id) => {
+        const source = found.get(id) ?? { id, text: null, at: null, channel: null };
+        return {
+          ...source,
+          text:
+            quote && source.text && foldQuote(source.text).includes(foldQuote(quote))
+              ? quote
+              : null,
+        };
+      });
+      // Keep the serialized result inside the per-tool context budget in both
+      // context modes: the note text comes in byte windows (continue with
+      // offset=nextOffset; textLength is exact), and source quotes trim last
+      // with a count when they would pass the budget. The stored note and
+      // sources stay complete; history_search around {sourceId} reads one.
+      const windowed =
+        typeof result.text === 'string'
+          ? (() => {
+              const window = byteWindow(result.text, input.offset ?? 0, 3000);
+              return {
+                text: window.text,
+                shortened: window.next !== null,
+                textLength: result.text.length,
+                ...(window.next !== null ? { nextOffset: window.next } : {}),
+              };
+            })()
+          : {};
+      let sourcesTruncated = 0;
+      while (
+        mapped.length &&
+        Buffer.byteLength(JSON.stringify({ ...result, ...windowed, sources: mapped })) > 6000
+      ) {
+        mapped.pop();
+        sourcesTruncated++;
+      }
       return {
         ...result,
-        sources: result.sources.map((id) => {
-          const source = found.get(id) ?? { id, text: null, at: null, channel: null };
-          return {
-            ...source,
-            text:
-              quote && source.text && foldQuote(source.text).includes(foldQuote(quote))
-                ? quote
-                : null,
-          };
-        }),
+        ...windowed,
+        sources: mapped,
+        ...(sourcesTruncated ? { sourcesTruncated } : {}),
       };
     },
     note: async (raw: unknown) => noteText((await load()).tree, path.parse(raw)),
