@@ -8,6 +8,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
+import { retryableRateLimitWait } from '../src/providers/pi/request-quota.ts';
 import test from 'node:test';
 import {
   learnRequestQuota,
@@ -259,6 +260,32 @@ test('large tool results stay bounded as the conversation grows', async (t) => {
     `request grew by ${last - first} bytes across two 30k tool results`,
   );
   await session.dispose();
+});
+
+test('the retry-hint parser reads Groq and Gemini pacing text and refuses long waits', () => {
+  // Verbatim provider texts (ids/org trimmed); the Gemini one is the exact
+  // wording from the user's gemini-3.8-flash 429 screenshot.
+  const groq =
+    'Rate limit reached for model `fixture-groq` on input tokens per minute (ITPM): Limit 7000, Used 3932, Requested 4074. Please try again in 8.61s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing';
+  const gemini =
+    'HTTP 429; status: Too Many Requests; status: RESOURCE_EXHAUSTED; You exceeded your current quota, please check your plan and billing details. Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 250000, model: fixture-gemini, description: Generate content input tokens per minute limit exceeded on Free Tier. Please retry in 11.732249794s.; quotaMetric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count; quotaId: GenerateContentInputTokensPerModelPerMinute-FreeTier; quotaValue: 250000; retryDelay: 11s';
+  assert.equal(retryableRateLimitWait(groq), 8610);
+  assert.equal(retryableRateLimitWait(gemini), 11732.249794);
+  assert.equal(
+    retryableRateLimitWait('Request too large for model `fixture` on ITPM: Limit 7000, Requested 15463. Please reduce your message size.'),
+    undefined,
+    'a 413 oversize rejection carries no hint and must never be retried',
+  );
+  assert.equal(
+    retryableRateLimitWait('Rate limit reached on requests per day (RPD): Limit 50. Please retry in 6h12m.'),
+    undefined,
+    'a daily quota has no seconds hint within the cap and must fail clearly',
+  );
+  assert.equal(
+    retryableRateLimitWait('Please retry in 45.5s.'),
+    undefined,
+    'a hint beyond the 30s cap fails clearly instead of being truncated',
+  );
 });
 
 test('a 429 per-minute rejection retries at the provider hint even with the billing upsell text, then completes', async (t) => {
