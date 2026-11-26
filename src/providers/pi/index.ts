@@ -37,10 +37,12 @@ import {
 import { createPiModelRuntime } from './models.ts';
 import { createTurnFallback, modelKey } from './fallback.ts';
 import {
+  estimateRequestTokens,
   knownOutputQuota,
   knownRequestQuota,
   learnOutputQuota,
   learnRequestQuota,
+  noteObservedUsage,
   quotaPreflightError,
   retryableRateLimitWait,
 } from './request-quota.ts';
@@ -1336,6 +1338,12 @@ export function createPiAgent(options: {
           if (!fallback && quotaKey) {
             learnRequestQuota(quotaKey, result.errorMessage);
             learnOutputQuota(quotaKey, result.errorMessage);
+            // The provider's own count corrects our conservative estimate
+            // for this connection, so a learned limit stops refusing
+            // requests that actually fit (live: est ~7.2k vs real 4,011).
+            const realInput = (result.usage as { input?: number } | undefined)?.input;
+            if (typeof realInput === 'number' && realInput > 0 && !result.errorMessage)
+              noteObservedUsage(quotaKey, estimateRequestTokens(context), realInput);
           }
           const wait = retryableRateLimitWait(result.errorMessage);
           if (wait !== undefined && attempt < 1) {

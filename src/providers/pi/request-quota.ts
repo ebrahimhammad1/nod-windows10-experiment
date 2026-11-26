@@ -88,6 +88,27 @@ export function estimateRequestTokens(context: Context): number {
   return Math.ceil(total);
 }
 
+// Per-connection estimate calibration: the raw estimate is deliberately
+// conservative (~2.5 chars/token), but real tokenization varies by content
+// (a prose-heavy minimal request measured 4.4 chars/token live). One real
+// provider count corrects the estimate for that connection, clamped so a
+// single odd observation can only halve or double it.
+const calibration = new Map<string, number>();
+
+export function noteObservedUsage(key: string, rawEstimate: number, realTokens: number): void {
+  if (rawEstimate <= 0 || realTokens <= 0) return;
+  const factor = Math.min(2, Math.max(0.5, rawEstimate / realTokens));
+  const prior = calibration.get(key);
+  // Blend so one odd request does not swing the estimate wildly.
+  calibration.set(key, prior === undefined ? factor : prior * 0.5 + factor * 0.5);
+}
+
+function calibratedEstimate(key: string, context: Context): number {
+  const raw = estimateRequestTokens(context);
+  const factor = calibration.get(key);
+  return factor === undefined ? raw : Math.ceil(raw / factor);
+}
+
 export function quotaPreflightError(
   key: string,
   context: Context,
@@ -95,7 +116,7 @@ export function quotaPreflightError(
 ): Error | undefined {
   const quota = knownRequestQuota(key, now);
   if (!quota) return undefined;
-  const estimate = estimateRequestTokens(context);
+  const estimate = calibratedEstimate(key, context);
   if (estimate <= quota.limit) return undefined;
   // Bounded probe: one request per interval goes through to re-check the
   // limit against the provider instead of trusting the learned value.

@@ -8,15 +8,14 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
-import {
-  learnOutputQuota,
-  retryableRateLimitWait,
-} from '../src/providers/pi/request-quota.ts';
 import test from 'node:test';
 import {
+  learnOutputQuota,
   learnRequestQuota,
   knownRequestQuota,
+  noteObservedUsage,
   quotaPreflightError,
+  retryableRateLimitWait,
   QUOTA_TTL_MS,
   PROBE_INTERVAL_MS,
 } from '../src/providers/pi/request-quota.ts';
@@ -313,6 +312,27 @@ test('a 429 per-minute rejection retries at the provider hint even with the bill
     `the retry must be visible, got: ${JSON.stringify(events.map((e) => e.type))}`,
   );
   await session.dispose();
+});
+
+test('a real provider count calibrates the conservative estimate per connection', () => {
+  const key = `cal-${randomUUID()}`;
+  learnRequestQuota(key, 'Request too large for model `x` on input tokens per minute (ITPM): Limit 7000, Requested 15463');
+  const bigContext: any = {
+    systemPrompt: 'y'.repeat(20_000),
+    messages: [],
+    tools: [],
+  };
+  // The probe clock arms at learning, so the immediate request is refused.
+  const refused = quotaPreflightError(key, bigContext);
+  assert.ok(refused, 'the raw conservative estimate (8,000) exceeds the learned 7,000');
+  // The provider actually counted 4,000 for a request we estimated at 8,000:
+  // calibrated estimates halve and the same context now fits.
+  noteObservedUsage(key, 8_000, 4_000);
+  assert.equal(
+    quotaPreflightError(key, bigContext),
+    undefined,
+    'calibrated by the provider count, the same request fits the learned limit',
+  );
 });
 
 test('a learned output quota clamps max_tokens so the provider stops rejecting outright', async (t) => {

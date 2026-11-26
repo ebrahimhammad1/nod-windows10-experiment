@@ -116,6 +116,7 @@ async function run(mode: 'CURRENT' | 'MINIMAL', promptText: string) {
       learnRequestQuota(
         `compatible/api_key/${MODEL}`,
         `Request too large for model \`${MODEL}\` on input tokens per minute (ITPM): Limit ${process.env.NOD_BENCH_LEARN}, Requested 99999. Please reduce your message size.`,
+        Date.now() - Number(process.env.NOD_BENCH_LEARN_AGE_MS ?? 0),
       );
     if (process.env.NOD_BENCH_LEARN_OUTPUT)
       learnOutputQuota(
