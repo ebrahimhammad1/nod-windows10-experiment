@@ -104,7 +104,7 @@ const CORE_DECLARED = [
 
 async function openSession(
   t: test.TestContext,
-  opts?: { bigExec?: boolean; validatingMemory?: boolean },
+  opts?: { bigExec?: boolean; validatingMemory?: boolean; bigResult?: string },
 ) {
   const modelId = `fixture-${randomUUID().slice(0, 8)}`;
   const { createPiAgent } = await import('../src/providers/pi/index.ts');
@@ -140,6 +140,8 @@ async function openSession(
           );
       }
       executed.push(def.name);
+      if (opts?.bigResult === def.name)
+        return { content: [{ type: 'text' as const, text: 'x'.repeat(30_000) }] };
       return { content: [{ type: 'text' as const, text: `${def.name} fixture result` }] };
     },
   }));
@@ -191,7 +193,7 @@ async function openSession(
     onEvent: (event: any) => events.push(event),
     shouldStop: () => false,
   } as any);
-  return { session, executed, events };
+  return { session, executed, events, modelId };
 }
 
 function declared(index: number): string[] {
@@ -306,6 +308,36 @@ test('a 429 per-minute rejection retries at the provider hint even with the bill
   assert.ok(
     events.some((event) => event.type === 'retry'),
     `the retry must be visible, got: ${JSON.stringify(events.map((e) => e.type))}`,
+  );
+  await session.dispose();
+});
+
+test('a gateway-dispatched tool result is bounded like a direct call', async (t) => {
+  responders = [
+    callReply('nod_tool', { name: 'memory', args: { action: 'memory_read' } }, 'c1'),
+    textReply('bounded answer'),
+  ];
+  callIndex = 0;
+  REQUESTS.length = 0;
+  const { session, executed, modelId } = await openSession(t, { bigResult: 'memory' });
+  // Simulate a learned per-minute quota (20k here: small enough that a 30k
+  // tool result must be bounded to a quarter of it, large enough that the
+  // fixture request itself still passes preflight).
+  learnRequestQuota(
+    `compatible/api_key/${modelId}`,
+    'Request too large for model `fixture-groq` on input tokens per minute (ITPM): Limit 20000, Requested 25000. Please reduce your message size.',
+  );
+  await session.prompt('read my memory', []);
+  assert.equal(REQUESTS.length, 2, 'gateway call + answer');
+  assert.ok(executed.includes('memory'), 'the gateway dispatched to memory');
+  const followUp = JSON.stringify(REQUESTS[1]);
+  assert.ok(
+    !followUp.includes('x'.repeat(1000)),
+    'the raw 30k tool result must not enter the next request: it is saved with a preview',
+  );
+  assert.ok(
+    followUp.length < 30_000,
+    `the follow-up request must stay small, got ${followUp.length} chars`,
   );
   await session.dispose();
 });

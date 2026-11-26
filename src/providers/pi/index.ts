@@ -37,6 +37,7 @@ import {
 import { createPiModelRuntime } from './models.ts';
 import { createTurnFallback, modelKey } from './fallback.ts';
 import {
+  knownRequestQuota,
   learnRequestQuota,
   quotaPreflightError,
   retryableRateLimitWait,
@@ -620,8 +621,21 @@ export function createPiAgent(options: {
         const text = result.content
           .flatMap((part) => (part.type === 'text' ? [part.text] : []))
           .join('\n');
+        // Context-window budgets alone are too lax on a per-minute-limited
+        // connection: the whole conversation is resent with every request,
+        // and one unbounded memory read rejected a live follow-up at 11,530
+        // requested tokens on a 7,000 ITPM connection. When a limit is
+        // learned, a single tool result may use at most a quarter of it.
+        const quotaKey = turnModels.get(input.turnId) ?? (access ? modelKey(access) : undefined);
+        const learned = quotaKey ? knownRequestQuota(quotaKey) : undefined;
+        const quotaTokenCap = learned ? Math.max(256, Math.floor(learned.limit / 4)) : Infinity;
+        const maxBytes = Math.min(
+          budget.toolOutput.maxBytes / toolCallCount,
+          quotaTokenCap * 2,
+        );
+        const maxTokens = Math.min(budget.toolOutput.maxTokens / toolCallCount, quotaTokenCap);
         if (
-          Buffer.byteLength(text) <= budget.toolOutput.maxBytes / toolCallCount &&
+          Buffer.byteLength(text) <= maxBytes &&
           estimateTokens({
             role: 'toolResult',
             toolCallId: '',
@@ -629,8 +643,7 @@ export function createPiAgent(options: {
             content: result.content,
             isError: result.isError ?? false,
             timestamp: 0,
-          }) <=
-            budget.toolOutput.maxTokens / toolCallCount
+          }) <= maxTokens
         )
           return result;
         const saved = await output.save(
@@ -877,7 +890,16 @@ export function createPiAgent(options: {
             throw new Error(
               `nod_tool calls load-on-demand tools by name; "${String(name)}" is not one. Use nod_tool_search to find loadable tools.`,
             );
-          return target.execute(id, (forwarded ?? {}) as never, signal, onUpdate, context);
+          // Gateway-dispatched tools must pass the same output bounding as
+          // direct calls: an unbounded result (a full memory read is ~7k
+          // tokens on its own) re-inflates the very next request past the
+          // connection's limit - measured live as a 413 at 11,530 requested
+          // on a 7,000 ITPM connection.
+          return boundedOutput(
+            target.name,
+            () => target.execute(id, (forwarded ?? {}) as never, signal, onUpdate, context),
+            signal,
+          );
         },
       });
       const guided = new Set<string>();
