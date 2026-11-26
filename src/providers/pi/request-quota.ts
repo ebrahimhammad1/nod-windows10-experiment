@@ -251,3 +251,21 @@ export function outputBudgetWaitMs(key: string, now: number = Date.now()): numbe
   if (remaining === undefined || remaining >= OUTPUT_MIN_USEFUL_TOKENS) return 0;
   return 60_000 - (now % 60_000) + 250;
 }
+
+// Text of the latest user message in a request context, for the Auto
+// structural-complexity signal (promptStructuralComplexity).
+export function lastUserText(context: Context): string {
+  for (let index = context.messages.length - 1; index >= 0; index--) {
+    const message = context.messages[index]!;
+    if (message.role !== 'user') continue;
+    const content = (message as { content?: unknown }).content;
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content))
+      return content
+        .filter((part) => part?.type === 'text')
+        .map((part) => part.text)
+        .join('\n');
+    return '';
+  }
+  return '';
+}

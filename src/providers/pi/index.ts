@@ -44,6 +44,7 @@ import { createTurnFallback, modelKey } from './fallback.ts';
 import {
   estimateRequestTokens,
   estimatedRequestTokens,
+  lastUserText,
   knownOutputQuota,
   noteObservedOutput,
   outputBudgetWaitMs,
@@ -487,24 +488,6 @@ function planBilled(event: AgentEvent): AgentEvent {
  * ```json fence is tolerated). Anything else is a normal reply, not a
  * command - strict on purpose, so prose is never mistaken for a tool call.
  */
-// Text of the latest user message in a request context, for the Auto
-// structural-complexity signal (promptStructuralComplexity).
-export function lastUserText(context: Context): string {
-  for (let index = context.messages.length - 1; index >= 0; index--) {
-    const message = context.messages[index]!;
-    if (message.role !== 'user') continue;
-    const content = (message as { content?: unknown }).content;
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content))
-      return content
-        .filter((part) => part?.type === 'text')
-        .map((part) => part.text)
-        .join('\n');
-    return '';
-  }
-  return '';
-}
-
 export function zeroToolCommand(
   reply: string,
 ): { tool: string; input?: Record<string, unknown> } | undefined {

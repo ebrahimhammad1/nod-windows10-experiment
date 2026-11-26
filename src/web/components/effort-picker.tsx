@@ -21,7 +21,7 @@ const effortNames: Record<ModelEffort | 'auto', string> = {
 
 // Matches the runtime policy: resolves per request from the turn's size
 // and the connection's learned quotas, never above the provider default.
-const autoHint = 'Lighter on simple requests, never above default';
+const autoHint = 'Lighter on simple requests (structure heuristic, not understanding), never above default';
 
 export function EffortPicker() {
   const models = useModels();

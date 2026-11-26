@@ -133,7 +133,9 @@ export const AUTO_TIGHT_OUTPUT_QUOTA = 1000;
  * Auto never EXCEEDS the provider default and the level always comes from
  * the model's OWN effort list - nothing provider-unsupported is invented.
  * Called once per request at the payload layer, where the turn's content
- * and the learned quotas are both visible.
+ * and the learned quotas are both visible. The complexity signal is a
+ * HEURISTIC PROXY (structural punctuation/format markers), not semantic
+ * task understanding - label it that way wherever it surfaces.
  */
 export function resolveSelectionEffort(
   provider: ModelProvider,
