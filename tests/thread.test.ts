@@ -8196,14 +8196,21 @@ test(
         },
       );
       await t.test(
-        'history search ranks word forms, keeps local dates and reads around a hit inside the owner’s active thread',
+        // TIE-BREAK TEST: with the 'simple' config there is no stemming, so
+        // this no longer proves word-form ranking: 'buying'!='buy' and
+        // 'properties'!='property' as tokens, both rows tie at one matched
+        // lexeme each. Rank ties break by created_at DESC then id DESC, so
+        // the fixture gives both rows the SAME created_at and pinned ids
+        // (best > newer) to make the id decide deterministically.
+        // Merged primary+fallback ranking (which would give 'best' a real
+        // lead) is a deferred decision, NOT part of P10.
+        'history search orders tied primary hits by id, keeps local dates and reads around a hit inside the owner’s active thread',
         async () => {
           const foreignThread = randomUUID();
           await db.pool.query("INSERT INTO threads(id,owner_id) VALUES($1,'history-other-owner')", [
             foreignThread,
           ]);
-          const add = async (text: string, at: string, owner = ownerId, threadId = freshThread) => {
-            const id = randomUUID();
+          const add = async (text: string, at: string, owner = ownerId, threadId = freshThread, id = randomUUID()) => {
             await db.pool.query(
               "INSERT INTO messages(id,owner_id,role,text,thread_id,created_at) VALUES($1,$2,'user',$3,$4,$5)",
               [id, owner, text, threadId, at],
@@ -8225,9 +8232,12 @@ test(
               .filter((message) => message.match !== false)
               .map((message) => message.id);
 
-          const best = await add('I am buying two properties in Brookside', '2019-03-01T10:00:00Z');
-          const newer = await add('The property tax letter arrived', '2019-03-02T10:00:00Z');
-          const after = await add('Lunch with Ana on Friday', '2019-03-03T10:00:00Z');
+          // Same created_at for best and newer + pinned ids with best >
+          // newer: the created_at-DESC tie-break cannot decide, so the
+          // id-DESC tie-break decides deterministically.
+          const best = await add('I am buying two properties in Brookside', '2019-03-01T10:00:00Z', ownerId, freshThread, 'ffffffff-ffff-4fff-bfff-fffffffffff9');
+          const newer = await add('The property tax letter arrived', '2019-03-01T10:00:00Z', ownerId, freshThread, 'ffffffff-ffff-4fff-bfff-fffffffffff1');
+          const after = await add('Lunch with Ana on Friday', '2019-03-03T10:00:00Z', ownerId, freshThread, '00000000-0000-4000-8000-0000000000b3');
           await hidden('We are buying a property near the river', '2019-03-04T10:00:00Z');
           assert.deepEqual(await search({ query: 'which property did I buy' }), [best, newer]);
           assert.deepEqual(
@@ -8235,14 +8245,20 @@ test(
               id,
               match,
             ]),
+            // 'after' sits inside the top hit's context block: context rows
+            // inherit the covering match's place, so it displays right after
+            // 'best'. The MATCH order [best, newer] is what ranking owns.
             [
               [best, true],
-              [newer, true],
               [after, false],
+              [newer, true],
             ],
           );
-          assert.deepEqual(await search({ query: 'which property did I buy', before: newer }), [
+          // The (created_at,id) boundary cuts before 'after'; both pinned
+          // tie rows are older and keep their pinned rank order.
+          assert.deepEqual(await search({ query: 'which property did I buy', before: after }), [
             best,
+            newer,
           ]);
 
           const previousZone = (
@@ -8519,8 +8535,21 @@ test(
           const plural = await add('I booked two p10flights yesterday', '2019-09-04T10:00:00Z');
           await add('Dinner with the neighbours on Sunday', '2019-09-05T10:00:00Z');
 
-          // Exact Arabic word, prefix-joined بالطيران and the mixed row all match.
-          assert.deepEqual(await search({ query: 'الطيران' }), [mixed, prefixed, arabic]);
+          // Exact Arabic word, prefix-joined بالطيران and the mixed row all
+          // match — but only when the FALLBACK serves the query. On SQL_ASCII
+          // the primary returns zero Arabic rows and the fallback finds all
+          // three (ties: created_at DESC). On UTF8 the primary hits the two
+          // exact-token rows, partial-primary semantics suppress the fallback,
+          // and the prefix-joined row is NOT found until merged
+          // primary+fallback ranking ships (deferred decision, not P10).
+          const serverEncoding = (
+            await db.pool.query<{ server_encoding: string }>('SHOW server_encoding')
+          ).rows[0].server_encoding;
+          assert.deepEqual(
+            await search({ query: 'الطيران' }),
+            serverEncoding === 'UTF8' ? [mixed, arabic] : [mixed, prefixed, arabic],
+            `query الطيران on ${serverEncoding}`,
+          );
           // A prefix-joined query term reaches the prefixed row.
           assert.deepEqual(await search({ query: 'بالطيران' }), [prefixed]);
           // A mixed-language query ranks the row matching both terms first.
@@ -8532,6 +8561,43 @@ test(
           // The pure-fallback plural case uses a term that is no token anywhere:
           assert.deepEqual(await search({ query: 'p10flight' }), [mixed]);
           assert.deepEqual(await search({ query: 'p10flight', from: '2019-09-04' }), [plural]);
+        },
+      );
+      await t.test(
+        'history search keeps rank order for adjacent matches with overlapping context windows',
+        async () => {
+          // Regression test for the hydration swap fixed in a60aa96f: two
+          // time-adjacent matches whose rank order is OPPOSITE to time order,
+          // close enough that their +/-1 context windows overlap. The display
+          // layer must keep the ranking order, not re-sort by time.
+          const add = async (text: string, at: string) => {
+            const id = randomUUID();
+            await db.pool.query(
+              "INSERT INTO messages(id,owner_id,role,text,thread_id,created_at) VALUES($1,$2,'user',$3,$4,$5)",
+              [id, ownerId, text, freshThread, at],
+            );
+            return id;
+          };
+          const shown = async (query: string) =>
+            (
+              (await personal.manage('history_search', { query })) as {
+                messages: Array<{ id: string; match?: boolean }>;
+              }
+            ).messages;
+
+          // oneTerm is older but matches one query token; twoTerms is newer
+          // and matches both, so it ranks first (higher idf sum). Unique
+          // tokens keep the shared fixture thread's other messages out.
+          const oneTerm = await add('zxqvalpha alone in this note', '2019-11-01T10:00:00Z');
+          const twoTerms = await add('zxqvalpha and zxqvbeta together', '2019-11-02T10:00:00Z');
+          const decoy = await add('zxqv unrelated filler note', '2019-11-03T10:00:00Z');
+
+          const messages = await shown('zxqvalpha zxqvbeta');
+          const matches = messages.filter((message) => message.match !== false).map((m) => m.id);
+          assert.deepEqual(matches, [twoTerms, oneTerm], 'rank order survives overlapping context windows');
+          // The adjacent non-matching row stays visible as context, unflagged.
+          const decoyRow = messages.find((message) => message.id === decoy);
+          assert.ok(decoyRow && decoyRow.match === false, 'context row present and unflagged');
         },
       );
       await t.test(
