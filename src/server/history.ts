@@ -14,6 +14,7 @@ const inputSchema = z
     to: z.iso.date().optional(),
     around: z.uuid().optional(),
     order: z.enum(['relevance', 'newest']).default('relevance'),
+    offset: z.number().int().min(0).optional(),
   })
   .refine((input) => input.query || input.around || input.from || input.to, {
     message: 'Search with query, from or to, or read around a result id.',
@@ -43,9 +44,18 @@ export function createHistorySearch({
   const kept = (alias: string) =>
     standing ? ` AND NOT (${alias}.role='user' AND ${withdrawnSql(alias)})` : '';
   return async function search(raw: unknown) {
-    const { query, before, cursor, from, to, around, order } = inputSchema.parse(raw);
+    const { query, before, cursor, from, to, around, order, offset } = inputSchema.parse(raw);
     if (around) {
-      const { rows } = await pool.query<HistoryMessage>(
+      // Bounded window read: the target comes in TARGET_CHARS windows (continue
+      // with offset=nextTargetOffset), context rows in short excerpts, and the
+      // whole page under AROUND_TEXT_BYTES, dropping the farthest context rows
+      // first. Originals stay complete in the DB; shortened flags, targetLength
+      // and contextComplete keep the ranges honest.
+      const TARGET_CHARS = 3000;
+      const CONTEXT_CHARS = 600;
+      const AROUND_TEXT_BYTES = 6000;
+      const start = offset ?? 0;
+      const { rows } = await pool.query<HistoryMessage & { target_length: number | null }>(
         `WITH target AS (
            SELECT m.created_at,m.id FROM messages m WHERE m.id=$2 AND m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}
            UNION ALL
@@ -57,12 +67,53 @@ export function createHistorySearch({
            (SELECT m.* FROM messages m,hit WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')} AND (m.created_at,m.id)<(hit.created_at,hit.id) ORDER BY m.created_at DESC,m.id DESC LIMIT 5)
            UNION ALL (SELECT m.* FROM messages m,hit WHERE m.id=hit.id)
            UNION ALL (SELECT m.* FROM messages m,hit WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')} AND (m.created_at,m.id)>(hit.created_at,hit.id) ORDER BY m.created_at,m.id LIMIT 5))
-         SELECT id,role,CASE WHEN id=(SELECT id FROM hit) THEN text ELSE left(text,6000) END AS text,
-           id<>(SELECT id FROM hit) AND length(text)>6000 AS shortened,turn_id,created_at FROM nearby ORDER BY created_at,id`,
-        [ownerId, around],
+         SELECT id,role,CASE WHEN id=(SELECT id FROM hit) THEN substring(text from $3+1 for ${TARGET_CHARS}) ELSE left(text,${CONTEXT_CHARS}) END AS text,
+           CASE WHEN id=(SELECT id FROM hit) THEN length(text)>$3+${TARGET_CHARS} ELSE length(text)>${CONTEXT_CHARS} END AS shortened,
+           turn_id,created_at,
+           CASE WHEN id=(SELECT id FROM hit) THEN length(text) END AS target_length FROM nearby ORDER BY created_at,id`,
+        [ownerId, around, start],
       );
       if (!rows.length) throw new Error('This history result is unavailable.');
-      return { messages: rows, complete: true, totalMatches: 1, nextCursor: null };
+      const targetIndex = rows.findIndex((row) => row.target_length !== null);
+      const target = targetIndex >= 0 ? rows[targetIndex]! : undefined;
+      // Drop the farthest context rows, alternating sides, until the page fits.
+      let bytes = rows.reduce((sum, row) => sum + Buffer.byteLength(row.text), 0);
+      let contextComplete = true;
+      const dropped = new Set<number>();
+      for (;;) {
+        if (bytes <= AROUND_TEXT_BYTES) break;
+        const before = rows.findIndex((_, index) => index < targetIndex && !dropped.has(index));
+        let after = -1;
+        for (let index = rows.length - 1; index > targetIndex; index--)
+          if (!dropped.has(index)) {
+            after = index;
+            break;
+          }
+        if (before < 0 && after < 0) break;
+        const drop =
+          before < 0
+            ? after
+            : after < 0
+              ? before
+              : targetIndex - before >= after - targetIndex
+                ? before
+                : after;
+        dropped.add(drop);
+        bytes -= Buffer.byteLength(rows[drop]!.text);
+        contextComplete = false;
+      }
+      const kept = rows.filter((_, index) => !dropped.has(index));
+      const nextTargetOffset =
+        target && target.target_length! > start + TARGET_CHARS ? start + TARGET_CHARS : null;
+      return {
+        messages: kept.map(({ target_length: _target_length, ...row }) => row),
+        complete: !nextTargetOffset,
+        totalMatches: 1,
+        nextCursor: null,
+        ...(target ? { targetLength: target.target_length } : {}),
+        ...(nextTargetOffset ? { nextTargetOffset } : {}),
+        ...(contextComplete ? {} : { contextComplete: false }),
+      };
     }
     const boundary = before
       ? (
@@ -188,12 +239,25 @@ export function createHistorySearch({
     const trimmed = keptCount < blocks.length && lastMatch;
     const pagedMessages = trimmed ? keptBlocks.flatMap((block) => block.rows) : messages;
     const pagedNext = trimmed ? lastMatch : nextCursor;
+    // Bound the turn-title list the same way; turnsTruncated says how many
+    // were left out so nothing is silently dropped.
+    const TURNS_TITLE_BYTES = 1500;
+    let titleBytes = 0;
+    let keptTurns = 0;
+    for (const row of turns.rows as Array<{ title?: string }>) {
+      const size = Buffer.byteLength(row.title ?? '');
+      if (keptTurns > 0 && titleBytes + size > TURNS_TITLE_BYTES) break;
+      titleBytes += size;
+      keptTurns++;
+    }
+    const turnsTruncated = turns.rows.length - keptTurns;
     return {
-      turns: turns.rows,
+      turns: turns.rows.slice(0, keptTurns),
       messages: pagedMessages,
       complete: !pagedNext,
       totalMatches: page.rows[0]?.total ?? 0,
       nextCursor: pagedNext,
+      ...(turnsTruncated ? { turnsTruncated } : {}),
     };
   };
 }

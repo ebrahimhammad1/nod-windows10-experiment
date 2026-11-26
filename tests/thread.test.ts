@@ -8315,12 +8315,54 @@ test(
           assert.equal(excerpt.shortened, true);
           assert.match(excerpt.text, /spare key is with Marisol/);
           assert.ok(excerpt.text.length < 1200);
-          const whole = (
-            (await personal.manage('history_search', { around: long })) as {
-              messages: Array<{ id: string; text: string }>;
-            }
-          ).messages.find((message) => message.id === long)!;
-          assert.ok(whole.text.length > 4000);
+          // A message over one window pages by offset; the windows reassemble
+          // into the complete original with exact length reported throughout.
+          const longText = `${filler}The spare key is with Marisol next door. ${filler}`;
+          type AroundPage = {
+            messages: Array<{ id: string; text: string; shortened: boolean }>;
+            complete: boolean;
+            nextTargetOffset?: number;
+            targetLength?: number;
+          };
+          const windows: string[] = [];
+          let offset: number | undefined;
+          for (;;) {
+            const aroundPage = (await personal.manage('history_search', {
+              around: long,
+              ...(offset === undefined ? {} : { offset }),
+            })) as AroundPage;
+            const row = aroundPage.messages.find((message) => message.id === long)!;
+            windows.push(row.text);
+            assert.equal(row.shortened, !aroundPage.complete);
+            assert.equal(aroundPage.targetLength, longText.length);
+            if (aroundPage.complete) break;
+            assert.ok(aroundPage.nextTargetOffset);
+            offset = aroundPage.nextTargetOffset;
+          }
+          assert.ok(windows.length >= 2, 'a message over one window must page');
+          assert.equal(windows.join(''), longText);
+          assert.match(windows.join(''), /spare key is with Marisol/);
+          const whole = { text: windows[0]! };
+          // A window read drops the farthest context rows, never the target,
+          // when the page would pass the byte budget.
+          const cluster: string[] = [];
+          for (let index = 0; index < 11; index++)
+            cluster.push(
+              await add(`windowcontext ${index} ${'ctx '.repeat(200)}`, minute(40 + index)),
+            );
+          const crowded = (await personal.manage('history_search', {
+            around: cluster[5]!,
+          })) as {
+            messages: Array<{ id: string; text: string }>;
+            contextComplete?: boolean;
+          };
+          const crowdedBytes = crowded.messages.reduce(
+            (total, message) => total + Buffer.byteLength(message.text),
+            0,
+          );
+          assert.ok(crowdedBytes <= 6000, `window page carries ${crowdedBytes} text bytes`);
+          assert.equal(crowded.contextComplete, false);
+          assert.ok(crowded.messages.some(({ id }) => id === cluster[5]));
           const historyTurn = randomUUID();
           await db.pool.query(
             "INSERT INTO turns(id,owner_id,thread_id,session_id,prompt,source,status,created_at) VALUES($1,$2,$3,$3,'Synthetic history turn lookup','user','succeeded','2019-04-01T10:00:00Z')",
@@ -8337,7 +8379,7 @@ test(
             messages: Array<{ id: string; text: string; shortened: boolean }>;
           };
           assert.equal(turnContext.messages.find(({ id }) => id === long)?.text, whole.text);
-          assert.equal(turnContext.messages.find(({ id }) => id === long)?.shortened, false);
+          assert.equal(turnContext.messages.find(({ id }) => id === long)?.shortened, true);
           const hiddenAnchor = await add('Synthetic hidden anchor', minute(15));
           const visibleAnchor = await add('Synthetic visible anchor', minute(16));
           const visibleTurn = randomUUID();

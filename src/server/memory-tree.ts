@@ -341,11 +341,18 @@ const matches = (tokens: string[], term: string) =>
     (token) => token === term || ((term.length > 2 || cjk.test(term)) && token.startsWith(term)),
   );
 
-const brief = (entry: Entry) => ({
-  path: pathOf(entry),
-  abstract: abstractOf(entry),
-  status: statusOf(entry),
-});
+const brief = (entry: Entry) => {
+  // Notes without an explicit abstract fall back to their full text; cap
+  // that fallback so a find list stays bounded. memory_read {path} returns
+  // the complete note.
+  const abstract = abstractOf(entry);
+  return {
+    path: pathOf(entry),
+    abstract: abstract.length <= 400 ? abstract : `${abstract.slice(0, 400)}…`,
+    status: statusOf(entry),
+    ...(abstract.length > 400 ? { abstractShortened: true } : {}),
+  };
+};
 
 export function find(tree: Tree, query: string, within?: Area) {
   const terms = [...new Set(words(query))];
