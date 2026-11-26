@@ -180,7 +180,9 @@ export function createHistorySearch({
       .map((word) => word.trim())
       .filter((word) => word.length >= 2)
       .map((word) => `%${word.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`);
-    if (query && !cursor && page.rows.length === 0 && turns.rows.length === 0 && fallbackTerms.length) {
+    let usedFallback = false;
+    if (query && page.rows.length === 0 && turns.rows.length === 0 && fallbackTerms.length) {
+      usedFallback = true;
       // Terms are passed as one array parameter ($2); each is an escaped
       // %term% pattern. Ranking mirrors the primary search: rarity-weighted
       // (idf) over the scoped corpus, newest first on ties.
@@ -191,6 +193,7 @@ export function createHistorySearch({
         before ?? null,
         from ?? null,
         to ?? null,
+        cursor ?? null,
       ];
       const fscope = (alias: string) =>
         `${alias}.owner_id=$1 AND ${activeThreadSql(alias)}
@@ -210,7 +213,7 @@ export function createHistorySearch({
            FROM corpus)
          SELECT id,left(prompt,200) AS title,status,source,created_at,split_part(channel,':',1) AS channel
          FROM scored WHERE score>0 ORDER BY score DESC,created_at DESC,id DESC LIMIT 15`,
-        fallbackValues,
+        fallbackValues.slice(0, 6),
       );
       page = await pool.query<HistoryMessage & { place: string; total: number }>(
         `WITH z AS (SELECT coalesce((SELECT time_zone FROM preferences WHERE owner_id=$1),'UTC') AS zone),
@@ -225,16 +228,27 @@ export function createHistorySearch({
            FROM corpus),
          ranked AS (
            SELECT id,role,text,created_at,row_number() OVER (ORDER BY score DESC,created_at DESC,id DESC) AS place
-           FROM scored WHERE score>0)
+           FROM scored WHERE score>0),
+         position AS (SELECT place FROM ranked WHERE id=$7::uuid),
+         hits AS (SELECT * FROM ranked WHERE $7::uuid IS NULL OR place>(SELECT place FROM position) ORDER BY place LIMIT 21)
          SELECT id,role,left(text,6000) AS text,length(text)>6000 AS shortened,created_at,place,
-           (SELECT count(*)::int FROM ranked) AS total FROM ranked ORDER BY place LIMIT 21`,
+           (SELECT count(*)::int FROM ranked) AS total FROM hits ORDER BY place`,
         fallbackValues,
       );
     }
-    if (cursor && !page.rows.length) {
+    if (cursor && !page.rows.length && !usedFallback) {
       const { rows } = await pool.query(
         `${terms} SELECT m.id FROM messages m CROSS JOIN terms WHERE ${where('m', 'm.text')} AND m.hidden_at IS NULL${kept('m')} AND m.id=$7::uuid`,
         [...values, cursor],
+      );
+      if (!rows.length) throw new Error('This history cursor does not match the search.');
+    }
+    if (cursor && !page.rows.length && usedFallback) {
+      const { rows } = await pool.query(
+        `SELECT m.id FROM messages m
+         WHERE m.id=$3::uuid AND m.owner_id=$1 AND ${activeThreadSql('m')} AND m.hidden_at IS NULL
+           AND EXISTS (SELECT 1 FROM unnest($2::text[]) AS t(term) WHERE m.text ILIKE t.term ESCAPE '\')`,
+        [ownerId, fallbackTerms, cursor],
       );
       if (!rows.length) throw new Error('This history cursor does not match the search.');
     }

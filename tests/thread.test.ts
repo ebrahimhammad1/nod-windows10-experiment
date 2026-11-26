@@ -8562,6 +8562,58 @@ test(
         },
       );
       await t.test(
+        'history search fallback pages through every substring match',
+        async () => {
+          const add = async (text: string, at: string) => {
+            const id = randomUUID();
+            await db.pool.query(
+              "INSERT INTO messages(id,owner_id,role,text,thread_id,created_at) VALUES($1,$2,'user',$3,$4,$5)",
+              [id, ownerId, text, freshThread, at],
+            );
+            return id;
+          };
+          const search = async (args: Record<string, unknown>) =>
+            (await personal.manage('history_search', args)) as {
+              messages: Array<{ id: string; match?: boolean }>;
+              nextCursor?: string | null;
+              totalMatches?: number;
+            };
+          const matched = (page: { messages: Array<{ id: string; match?: boolean }> }) =>
+            page.messages.filter((message) => message.match !== false).map((message) => message.id);
+
+          // The term sits inside a larger token, so the primary FTS misses all
+          // 25 rows and the fallback must page them without drops or repeats.
+          const ids: string[] = [];
+          for (let index = 0; index < 25; index++)
+            ids.push(
+              await add(
+                `note ${index} about prexxpagingbeaconxxpost plans`,
+                `2019-11-01T10:${String(index).padStart(2, '0')}:00Z`,
+              ),
+            );
+          const page1 = await search({ query: 'xxpagingbeaconxx' });
+          assert.equal(page1.totalMatches, 25);
+          assert.equal(matched(page1).length, 20);
+          assert.ok(page1.nextCursor, 'first fallback page must hand a cursor');
+          const page2 = await search({ query: 'xxpagingbeaconxx', cursor: page1.nextCursor });
+          assert.equal(page2.totalMatches, 25);
+          assert.equal(matched(page2).length, 5);
+          assert.equal(page2.nextCursor, null);
+          const overlap = matched(page2).filter((id) => matched(page1).includes(id));
+          assert.deepEqual(overlap, []);
+          assert.deepEqual(
+            new Set([...matched(page1), ...matched(page2)]),
+            new Set(ids),
+            'every fallback match is shown exactly once across the pages',
+          );
+          // A cursor that is not one of the fallback matches is still rejected.
+          await assert.rejects(
+            search({ query: 'xxpagingbeaconxx', cursor: randomUUID() }),
+            /does not match the search/,
+          );
+        },
+      );
+      await t.test(
         'history search pages stay byte-bounded and the cursor reaches every match',
         async () => {
           const add = async (text: string, at: string) => {
