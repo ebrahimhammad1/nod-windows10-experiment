@@ -40,6 +40,7 @@ import {
   estimateRequestTokens,
   knownOutputQuota,
   noteObservedOutput,
+  outputBudgetWaitMs,
   remainingOutputBudget,
   knownRequestQuota,
   learnOutputQuota,
@@ -622,7 +623,27 @@ export function createPiAgent(options: {
         signal?: AbortSignal,
         nested = false,
       ) => {
-        const result = await run();
+        let result;
+        try {
+          result = await run();
+        } catch (error) {
+          // Abort and stop must keep propagating untouched; any other thrown
+          // tool error becomes an error tool-result so the model sees it -
+          // and it must be bounded like any other result, or a huge error
+          // message lands raw in the next request.
+          const message = error instanceof Error ? error.message : String(error);
+          if (
+            nested ||
+            signal?.aborted ||
+            (error instanceof Error && error.name === 'AbortError') ||
+            /turn was stopped/i.test(message)
+          )
+            throw error;
+          result = {
+            content: [{ type: 'text' as const, text: message }],
+            isError: true,
+          } as Awaited<ReturnType<ToolDefinition['execute']>>;
+        }
         if (nested) return result;
         const text = result.content
           .flatMap((part) => (part.type === 'text' ? [part.text] : []))
@@ -1310,8 +1331,15 @@ export function createPiAgent(options: {
         // Never ask for more output than the connection's learned per-minute
         // output limit has left in this minute; the provider rejects
         // over-budget requests outright (measured live: OTPM Limit 1000,
-        // Requested 1232). The clamp keeps a small floor so a turn is not
-        // strangled to zero near the window edge.
+        // Requested 1232). When too little is left to be useful, wait out
+        // the window instead of knowingly overshooting the quota.
+        if (!fallback && quotaKey) {
+          const outputWait = outputBudgetWaitMs(quotaKey);
+          if (outputWait > 0) {
+            input.onEvent({ type: 'retry', model: target.id, attempt: 1, attempts: 2 });
+            await new Promise((resolve) => setTimeout(resolve, outputWait));
+          }
+        }
         const outputCap = quotaKey ? remainingOutputBudget(quotaKey) : undefined;
         const requestOptions =
           outputCap !== undefined && (options?.maxTokens === undefined || options.maxTokens > outputCap)

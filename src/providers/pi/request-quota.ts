@@ -213,7 +213,11 @@ export function knownOutputQuota(
 // clamp to what is left, with a small floor so a turn is never strangled
 // to zero (the provider still answers small requests as the window slides).
 const outputUsed = new Map<string, { minute: number; used: number }>();
-const OUTPUT_FLOOR_TOKENS = 64;
+// Below this many remaining output tokens a request is not worth sending:
+// asking for more than the window has left is a guaranteed rejection, and
+// silently shrinking the answer destroys the task. Wait for the window
+// instead (outputBudgetWaitMs).
+export const OUTPUT_MIN_USEFUL_TOKENS = 64;
 
 export function noteObservedOutput(key: string, outputTokens: number, now: number = Date.now()) {
   if (outputTokens <= 0) return;
@@ -229,5 +233,15 @@ export function remainingOutputBudget(key: string, now: number = Date.now()): nu
   const minute = Math.floor(now / 60_000);
   const entry = outputUsed.get(key);
   const used = entry && entry.minute === minute ? entry.used : 0;
-  return Math.max(OUTPUT_FLOOR_TOKENS, quota.limit - used);
+  return Math.max(0, quota.limit - used);
+}
+
+// Milliseconds until the output window has room again, when the remaining
+// budget is too small to be useful. The provider's window is sliding, so
+// the next minute boundary is an approximation; the 429 hint-retry remains
+// the backstop when it fires anyway.
+export function outputBudgetWaitMs(key: string, now: number = Date.now()): number {
+  const remaining = remainingOutputBudget(key, now);
+  if (remaining === undefined || remaining >= OUTPUT_MIN_USEFUL_TOKENS) return 0;
+  return 60_000 - (now % 60_000) + 250;
 }

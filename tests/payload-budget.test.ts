@@ -15,6 +15,7 @@ import {
   knownRequestQuota,
   noteObservedOutput,
   noteObservedUsage,
+  outputBudgetWaitMs,
   quotaPreflightError,
   remainingOutputBudget,
   retryableRateLimitWait,
@@ -108,7 +109,7 @@ const CORE_DECLARED = [
 
 async function openSession(
   t: test.TestContext,
-  opts?: { bigExec?: boolean; validatingMemory?: boolean; bigResult?: string },
+  opts?: { bigExec?: boolean; validatingMemory?: boolean; bigResult?: string; bigThrow?: string },
 ) {
   const modelId = `fixture-${randomUUID().slice(0, 8)}`;
   const { createPiAgent } = await import('../src/providers/pi/index.ts');
@@ -144,6 +145,7 @@ async function openSession(
           );
       }
       executed.push(def.name);
+      if (opts?.bigThrow === def.name) throw new Error('x'.repeat(30_000));
       if (opts?.bigResult === def.name)
         return { content: [{ type: 'text' as const, text: 'x'.repeat(30_000) }] };
       return { content: [{ type: 'text' as const, text: `${def.name} fixture result` }] };
@@ -324,12 +326,15 @@ test('the output clamp spends the remaining minute budget, never the whole limit
   noteObservedOutput(key, 600, now);
   assert.equal(remainingOutputBudget(key, now), 400, 'second request this minute gets the remainder');
   noteObservedOutput(key, 395, now);
-  assert.equal(remainingOutputBudget(key, now), 64, 'a near-exhausted window keeps the floor, not zero');
+  assert.equal(remainingOutputBudget(key, now), 5, 'a near-exhausted window reports the true remainder');
+  const wait = outputBudgetWaitMs(key, now);
+  assert.ok(wait > 0 && wait <= 60_250, `an exhausted window waits for the next one, got ${wait}ms`);
   assert.equal(
     remainingOutputBudget(key, now + 61_000),
     1000,
     'the next minute restores the full learned limit',
   );
+  assert.equal(outputBudgetWaitMs(key, now + 61_000), 0, 'no wait once the window has room');
 });
 
 test('a real provider count calibrates the conservative estimate per connection', () => {
@@ -368,6 +373,33 @@ test('a learned output quota clamps max_tokens so the provider stops rejecting o
   assert.ok(
     (REQUESTS[0].max_tokens ?? 0) <= 1000,
     `max_tokens must be clamped to the learned output limit, got ${REQUESTS[0].max_tokens}`,
+  );
+  await session.dispose();
+});
+
+test('a thrown tool error is bounded like a result and keeps its error flag', async (t) => {
+  responders = [
+    callReply('nod_tool', { name: 'memory', args: { action: 'memory_read' } }, 'c1'),
+    textReply('handled the error'),
+  ];
+  callIndex = 0;
+  REQUESTS.length = 0;
+  const { session, executed, modelId } = await openSession(t, { bigThrow: 'memory' });
+  learnRequestQuota(
+    `compatible/api_key/${modelId}`,
+    'Request too large for model `fixture-groq` on input tokens per minute (ITPM): Limit 20000, Requested 25000. Please reduce your message size.',
+  );
+  await session.prompt('read my memory', []);
+  assert.equal(REQUESTS.length, 2, 'gateway call + answer');
+  assert.ok(executed.includes('memory'), 'the gateway dispatched to memory');
+  const followUp = JSON.stringify(REQUESTS[1]);
+  assert.ok(
+    !followUp.includes('x'.repeat(1000)),
+    'a huge thrown error message must not enter the next request raw',
+  );
+  assert.ok(
+    followUp.includes('workspaceFile') || followUp.includes('.nod/outputs'),
+    'the bounded error keeps a retrievable pointer',
   );
   await session.dispose();
 });
