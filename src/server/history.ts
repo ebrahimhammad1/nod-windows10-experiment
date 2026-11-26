@@ -139,18 +139,61 @@ export function createHistorySearch({
          JOIN picked p ON t.n BETWEEN p.n-$3 AND p.n+$3 GROUP BY t.id,t.owner_id,t.role,t.text,t.turn_id,t.created_at,t.n)
        SELECT s.id,s.role,CASE WHEN length(s.text)<=1200 THEN s.text
          ELSE ts_headline('english',s.text,terms.q,'StartSel="",StopSel="",MaxWords=60,MinWords=20,MaxFragments=3,FragmentDelimiter=" … "') END AS text,
-         length(s.text)>1200 AS shortened,s.turn_id,s.created_at,
+         length(s.text)>1200 AS shortened,s.turn_id,s.created_at,s.place,
          split_part(COALESCE(u.channel,'web'),':',1) AS channel,s.match
        FROM shown s CROSS JOIN terms LEFT JOIN turns u ON u.id=s.turn_id AND u.owner_id=$1
        WHERE TRUE${kept('s')} ORDER BY s.place,s.n`,
       [ownerId, picked.map((row) => row.id), query ? 1 : 0, query ?? null],
     );
+    // Keep one page inside the per-tool context budget: whole match blocks
+    // (a match plus its surrounding rows) are added until the byte cap, and
+    // the search continues with nextCursor, so no match is dropped for good.
+    const PAGE_TEXT_BYTES = 6000;
+    const blocks: {
+      place: number;
+      rows: typeof messages;
+      bytes: number;
+      matchId: string | null;
+    }[] = [];
+    for (const row of messages) {
+      const place = Number((row as { place?: unknown }).place ?? -1);
+      const last = blocks.at(-1);
+      if (last && last.place === place) {
+        last.rows.push(row);
+        last.bytes += Buffer.byteLength(row.text);
+        if (row.match) last.matchId = row.id;
+      } else {
+        blocks.push({
+          place,
+          rows: [row],
+          bytes: Buffer.byteLength(row.text),
+          matchId: row.match ? row.id : null,
+        });
+      }
+    }
+    let pageBytes = 0;
+    let keptCount = blocks.length;
+    for (const [index, block] of blocks.entries()) {
+      if (index > 0 && pageBytes + block.bytes > PAGE_TEXT_BYTES) {
+        keptCount = index;
+        break;
+      }
+      pageBytes += block.bytes;
+    }
+    const keptBlocks = blocks.slice(0, keptCount);
+    const lastMatch =
+      [...keptBlocks].reverse().find((block) => block.matchId)?.matchId ?? null;
+    // Truncation needs a valid continuation cursor: a ranked match id. When
+    // no kept block has one (pathological), keep the whole page instead.
+    const trimmed = keptCount < blocks.length && lastMatch;
+    const pagedMessages = trimmed ? keptBlocks.flatMap((block) => block.rows) : messages;
+    const pagedNext = trimmed ? lastMatch : nextCursor;
     return {
       turns: turns.rows,
-      messages,
-      complete: !nextCursor,
+      messages: pagedMessages,
+      complete: !pagedNext,
       totalMatches: page.rows[0]?.total ?? 0,
-      nextCursor,
+      nextCursor: pagedNext,
     };
   };
 }
