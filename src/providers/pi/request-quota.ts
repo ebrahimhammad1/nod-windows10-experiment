@@ -149,3 +149,38 @@ export function retryableRateLimitWait(text: string | undefined): number | undef
   }
   return undefined;
 }
+
+// Output-token pacing is a separate learned limit (Groq free tier: OTPM
+// 1,000 vs ITPM 7,000). A request whose max_tokens alone exceeds the
+// connection's output limit is always rejected ("The request's expected
+// output tokens exceed the enforced limit"), so once the provider reports
+// the limit, max_tokens is clamped to it instead of wasting the request.
+const learnedOutput = new Map<string, { limit: number; at: number }>();
+
+export function learnOutputQuota(
+  key: string,
+  text: string | undefined,
+  now: number = Date.now(),
+): { limit: number; at: number } | undefined {
+  if (!text) return undefined;
+  const match = text.match(/output tokens per minute \(OTPM\): Limit ([\d,]+)/i);
+  if (!match) return undefined;
+  const limit = Number(match[1]!.replace(/,/g, ''));
+  if (!Number.isFinite(limit) || limit <= 0) return undefined;
+  const quota = { limit, at: now };
+  learnedOutput.set(key, quota);
+  return quota;
+}
+
+export function knownOutputQuota(
+  key: string,
+  now: number = Date.now(),
+): { limit: number; at: number } | undefined {
+  const quota = learnedOutput.get(key);
+  if (!quota) return undefined;
+  if (now - quota.at >= QUOTA_TTL_MS) {
+    learnedOutput.delete(key);
+    return undefined;
+  }
+  return quota;
+}

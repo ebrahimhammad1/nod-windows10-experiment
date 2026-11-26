@@ -8,7 +8,10 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
-import { retryableRateLimitWait } from '../src/providers/pi/request-quota.ts';
+import {
+  learnOutputQuota,
+  retryableRateLimitWait,
+} from '../src/providers/pi/request-quota.ts';
 import test from 'node:test';
 import {
   learnRequestQuota,
@@ -308,6 +311,25 @@ test('a 429 per-minute rejection retries at the provider hint even with the bill
   assert.ok(
     events.some((event) => event.type === 'retry'),
     `the retry must be visible, got: ${JSON.stringify(events.map((e) => e.type))}`,
+  );
+  await session.dispose();
+});
+
+test('a learned output quota clamps max_tokens so the provider stops rejecting outright', async (t) => {
+  responders = [textReply('clamped')];
+  callIndex = 0;
+  REQUESTS.length = 0;
+  const { session, modelId } = await openSession(t);
+  // The live free-tier rejection: OTPM Limit 1000, Requested 1232.
+  learnOutputQuota(
+    `compatible/api_key/${modelId}`,
+    'Request too large for model `fixture-groq` on output tokens per minute (OTPM): Limit 1000, Requested 1232. The request\'s expected output tokens exceed the enforced limit; reduce max_tokens.',
+  );
+  await session.prompt('hi', []);
+  assert.equal(REQUESTS.length, 1);
+  assert.ok(
+    (REQUESTS[0].max_tokens ?? 0) <= 1000,
+    `max_tokens must be clamped to the learned output limit, got ${REQUESTS[0].max_tokens}`,
   );
   await session.dispose();
 });

@@ -37,7 +37,9 @@ import {
 import { createPiModelRuntime } from './models.ts';
 import { createTurnFallback, modelKey } from './fallback.ts';
 import {
+  knownOutputQuota,
   knownRequestQuota,
+  learnOutputQuota,
   learnRequestQuota,
   quotaPreflightError,
   retryableRateLimitWait,
@@ -1301,13 +1303,24 @@ export function createPiAgent(options: {
           const refused = quotaPreflightError(quotaKey, context);
           if (refused) throw refused;
         }
+        // Never ask for more output than the connection's learned per-minute
+        // output limit allows in one request; the provider rejects those
+        // outright (measured live: OTPM Limit 1000, Requested 1232).
+        const outputCap = quotaKey ? knownOutputQuota(quotaKey)?.limit : undefined;
+        const requestOptions =
+          outputCap !== undefined && (options?.maxTokens === undefined || options.maxTokens > outputCap)
+            ? { ...options, maxTokens: outputCap }
+            : options;
         for (let attempt = 0; attempt < 2; attempt++) {
           let response;
           try {
-            response = await stream(target, context, options);
+            response = await stream(target, context, requestOptions);
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            if (!fallback && quotaKey) learnRequestQuota(quotaKey, message);
+            if (!fallback && quotaKey) {
+              learnRequestQuota(quotaKey, message);
+              learnOutputQuota(quotaKey, message);
+            }
             // Per-minute pacing (429) is retryable at the provider's own hint;
             // the session retry misclassifies these as billing limits, and
             // per-request size rejections (413) carry no hint and never match.
@@ -1320,7 +1333,10 @@ export function createPiAgent(options: {
             continue;
           }
           const result = await response.result();
-          if (!fallback && quotaKey) learnRequestQuota(quotaKey, result.errorMessage);
+          if (!fallback && quotaKey) {
+            learnRequestQuota(quotaKey, result.errorMessage);
+            learnOutputQuota(quotaKey, result.errorMessage);
+          }
           const wait = retryableRateLimitWait(result.errorMessage);
           if (wait !== undefined && attempt < 1) {
             input.onEvent({ type: 'retry', model: target.id, attempt: attempt + 1, attempts: 2 });
