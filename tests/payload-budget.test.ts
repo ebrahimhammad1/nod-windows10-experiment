@@ -13,8 +13,10 @@ import {
   learnOutputQuota,
   learnRequestQuota,
   knownRequestQuota,
+  noteObservedOutput,
   noteObservedUsage,
   quotaPreflightError,
+  remainingOutputBudget,
   retryableRateLimitWait,
   QUOTA_TTL_MS,
   PROBE_INTERVAL_MS,
@@ -312,6 +314,22 @@ test('a 429 per-minute rejection retries at the provider hint even with the bill
     `the retry must be visible, got: ${JSON.stringify(events.map((e) => e.type))}`,
   );
   await session.dispose();
+});
+
+test('the output clamp spends the remaining minute budget, never the whole limit per request', () => {
+  const key = `out-${randomUUID()}`;
+  learnOutputQuota(key, 'Request too large on output tokens per minute (OTPM): Limit 1000, Requested 1232');
+  const now = Date.now();
+  assert.equal(remainingOutputBudget(key, now), 1000, 'fresh window: full limit');
+  noteObservedOutput(key, 600, now);
+  assert.equal(remainingOutputBudget(key, now), 400, 'second request this minute gets the remainder');
+  noteObservedOutput(key, 395, now);
+  assert.equal(remainingOutputBudget(key, now), 64, 'a near-exhausted window keeps the floor, not zero');
+  assert.equal(
+    remainingOutputBudget(key, now + 61_000),
+    1000,
+    'the next minute restores the full learned limit',
+  );
 });
 
 test('a real provider count calibrates the conservative estimate per connection', () => {

@@ -39,6 +39,8 @@ import { createTurnFallback, modelKey } from './fallback.ts';
 import {
   estimateRequestTokens,
   knownOutputQuota,
+  noteObservedOutput,
+  remainingOutputBudget,
   knownRequestQuota,
   learnOutputQuota,
   learnRequestQuota,
@@ -1306,9 +1308,11 @@ export function createPiAgent(options: {
           if (refused) throw refused;
         }
         // Never ask for more output than the connection's learned per-minute
-        // output limit allows in one request; the provider rejects those
-        // outright (measured live: OTPM Limit 1000, Requested 1232).
-        const outputCap = quotaKey ? knownOutputQuota(quotaKey)?.limit : undefined;
+        // output limit has left in this minute; the provider rejects
+        // over-budget requests outright (measured live: OTPM Limit 1000,
+        // Requested 1232). The clamp keeps a small floor so a turn is not
+        // strangled to zero near the window edge.
+        const outputCap = quotaKey ? remainingOutputBudget(quotaKey) : undefined;
         const requestOptions =
           outputCap !== undefined && (options?.maxTokens === undefined || options.maxTokens > outputCap)
             ? { ...options, maxTokens: outputCap }
@@ -1320,7 +1324,12 @@ export function createPiAgent(options: {
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             if (!fallback && quotaKey) {
-              learnRequestQuota(quotaKey, message);
+              // A 413 carries the provider's exact Requested count: use it to
+              // correct the estimate that let the request through, or the
+              // same oversize request would loop.
+              const rejected = learnRequestQuota(quotaKey, message);
+              if (rejected)
+                noteObservedUsage(quotaKey, estimateRequestTokens(context), rejected.requested);
               learnOutputQuota(quotaKey, message);
             }
             // Per-minute pacing (429) is retryable at the provider's own hint;
@@ -1336,14 +1345,18 @@ export function createPiAgent(options: {
           }
           const result = await response.result();
           if (!fallback && quotaKey) {
-            learnRequestQuota(quotaKey, result.errorMessage);
+            const rejected = learnRequestQuota(quotaKey, result.errorMessage);
+            if (rejected)
+              noteObservedUsage(quotaKey, estimateRequestTokens(context), rejected.requested);
             learnOutputQuota(quotaKey, result.errorMessage);
             // The provider's own count corrects our conservative estimate
             // for this connection, so a learned limit stops refusing
             // requests that actually fit (live: est ~7.2k vs real 4,011).
-            const realInput = (result.usage as { input?: number } | undefined)?.input;
-            if (typeof realInput === 'number' && realInput > 0 && !result.errorMessage)
-              noteObservedUsage(quotaKey, estimateRequestTokens(context), realInput);
+            const usage = result.usage as { input?: number; output?: number } | undefined;
+            if (typeof usage?.input === 'number' && usage.input > 0 && !result.errorMessage)
+              noteObservedUsage(quotaKey, estimateRequestTokens(context), usage.input);
+            if (typeof usage?.output === 'number' && usage.output > 0)
+              noteObservedOutput(quotaKey, usage.output);
           }
           const wait = retryableRateLimitWait(result.errorMessage);
           if (wait !== undefined && attempt < 1) {

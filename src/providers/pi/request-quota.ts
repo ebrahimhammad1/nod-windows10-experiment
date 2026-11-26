@@ -205,3 +205,29 @@ export function knownOutputQuota(
   }
   return quota;
 }
+
+// Remaining output budget inside the current minute, per connection. The
+// learned OTPM limit is a per-minute window, not a per-request allowance:
+// clamping every request to the full limit would still reject whenever a
+// turn makes two requests in one minute. Track observed output usage and
+// clamp to what is left, with a small floor so a turn is never strangled
+// to zero (the provider still answers small requests as the window slides).
+const outputUsed = new Map<string, { minute: number; used: number }>();
+const OUTPUT_FLOOR_TOKENS = 64;
+
+export function noteObservedOutput(key: string, outputTokens: number, now: number = Date.now()) {
+  if (outputTokens <= 0) return;
+  const minute = Math.floor(now / 60_000);
+  const entry = outputUsed.get(key);
+  if (!entry || entry.minute !== minute) outputUsed.set(key, { minute, used: outputTokens });
+  else entry.used += outputTokens;
+}
+
+export function remainingOutputBudget(key: string, now: number = Date.now()): number | undefined {
+  const quota = knownOutputQuota(key, now);
+  if (!quota) return undefined;
+  const minute = Math.floor(now / 60_000);
+  const entry = outputUsed.get(key);
+  const used = entry && entry.minute === minute ? entry.used : 0;
+  return Math.max(OUTPUT_FLOOR_TOKENS, quota.limit - used);
+}
