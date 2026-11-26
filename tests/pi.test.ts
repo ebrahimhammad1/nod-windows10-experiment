@@ -10126,6 +10126,79 @@ test('completed owner envelopes collapse to step markers and the last exchange s
   assert.ok(stored.includes('frozen memory snapshot for first task'));
 });
 
+test('step markers are bounded: the oldest collapse into one counting line', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-bounded-markers-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const requests: string[][] = [];
+  const script: string[] = [];
+  const agent = createPiAgent({
+    provider: 'openai',
+    apiKey: 'fixture-key',
+    sessionRoot: directory,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      result.session.setActiveToolsByName(result.session.getAllTools().map((tool) => tool.name));
+      result.session.agent.streamFunction = (model, context) => {
+        requests.push(context.messages.map((message) => JSON.stringify(message)));
+        script.shift();
+        const message: AssistantMessage = {
+          ...fauxAssistantMessage([{ type: 'text', text: `Conclusion ${requests.length}.` }]),
+          provider: model.provider,
+          model: model.id,
+          api: model.api,
+          stopReason: 'stop',
+          timestamp: Date.now(),
+        };
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: 'done', reason: 'stop', message });
+        return stream;
+      };
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const threadId = randomUUID();
+  const envelope = (instruction: string) =>
+    `Current local time: 2026-11-26T14:00:00+02:00.\nRequest data (JSON):\n${JSON.stringify({
+      mode: 'conversation',
+      memoryForThisRequest: `<frozen memory snapshot for ${instruction}>`,
+      recentConversation: [{ role: 'user', text: `frozen recent snapshot for ${instruction}` }],
+      currentInstruction: instruction,
+    })}`;
+  const turn = async (instruction: string) => {
+    script.push('answer');
+    const session = await agent.open({
+      ...fakeExecution(threadId, randomUUID()),
+      newRequest: true,
+      systemPrompt: 'Fixture system',
+      ...sandbox,
+      tools: [],
+      shouldStop: () => false,
+      onEvent() {},
+    });
+    await session.prompt(envelope(instruction), []);
+    await session.dispose();
+    await setTimeout(2);
+  };
+  for (let n = 1; n <= 9; n++) await turn(`task number ${n}`);
+  const latest = requests[8]!.join('\n');
+  // 9 turns: last two envelopes verbatim, 5 individual markers, the 2 oldest
+  // collapsed into one counting line.
+  assert.equal(latest.split('Earlier owner request (completed):').length - 1, 5);
+  assert.ok(latest.includes('Earlier completed steps - saved; search to read them.'));
+  assert.equal(latest.includes('task number 1'), false);
+  assert.equal(latest.includes('task number 2'), false);
+  assert.ok(latest.includes('task number 4'));
+  assert.ok(latest.includes('\\"currentInstruction\\":\\"task number 8\\"'));
+  assert.ok(latest.includes('\\"currentInstruction\\":\\"task number 9\\"'));
+  // The slope stopper: turn 8 and turn 9 carry the same marker count.
+  const previous = requests[7]!.join('\n');
+  assert.equal(previous.split('Earlier owner request (completed):').length - 1, 5);
+  assert.ok(previous.includes('Earlier completed steps - saved; search to read them.'));
+  // No count in the collapse line: the marker region stays byte-stable.
+  assert.equal(/\d+ earlier completed steps/.test(latest), false);
+});
+
 test('a spilled tool output points at its file and the optional script path', async () => {
   const { createContextOutput } = await import('../src/providers/pi/context-output.ts');
   const output = createContextOutput(

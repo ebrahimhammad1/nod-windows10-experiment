@@ -517,6 +517,12 @@ function duplicateResults(pi: ExtensionAPI) {
  */
 const envelopeInstruction = /"currentInstruction":"((?:[^"\\]|\\.)*)"/;
 
+// Bounded step markers: at most this many one-line markers are kept for
+// completed turns; older ones collapse into a single fixed line (no count -
+// the owner chose cache stability over the running total), so per-message
+// growth from markers goes to zero and the marker region stays byte-stable.
+const keptStepMarkers = 5;
+
 function earlierEnvelopes(pi: ExtensionAPI) {
   const prune = <T extends { role: string }>(messages: T[]) => {
     const envelopes = messages.flatMap((message, index) =>
@@ -528,24 +534,43 @@ function earlierEnvelopes(pi: ExtensionAPI) {
         : [],
     );
     // Current message plus the last exchange stay verbatim.
-    const keepFrom = envelopes.length <= 2 ? messages.length : envelopes[envelopes.length - 2]!;
-    if (keepFrom >= messages.length) return messages;
-    return messages.map((message, index) => {
-      if (index >= keepFrom || !envelopes.includes(index)) return message;
+    const prunable = envelopes.length > 2 ? envelopes.slice(0, -2) : [];
+    if (!prunable.length) return messages;
+    const collapsed = Math.max(prunable.length - keptStepMarkers, 0);
+    const collapseAt = collapsed >= 1 ? prunable[0]! : -1;
+    const dropped = new Set(collapsed >= 1 ? prunable.slice(0, collapsed) : []);
+    const marked = new Set(collapsed >= 1 ? prunable.slice(collapsed) : prunable);
+    return messages.flatMap((message, index) => {
+      if (index === collapseAt)
+        return [
+          {
+            ...message,
+            content: [
+              {
+                type: 'text' as const,
+                text: 'Earlier completed steps - saved; search to read them.',
+              },
+            ],
+          },
+        ];
+      if (dropped.has(index)) return [];
+      if (!marked.has(index)) return [message];
       const text = contentText(
         (message as unknown as { content: Parameters<typeof contentText>[0] }).content,
       );
       const instruction = text.match(envelopeInstruction)?.[1] ?? '';
       const heading = instruction.length > 100 ? `${instruction.slice(0, 100)}…` : instruction;
-      return {
-        ...message,
-        content: [
-          {
-            type: 'text' as const,
-            text: `Earlier owner request (completed): "${heading}" - the full message, its metadata and its memory evidence stay saved; read them with history_search if this turn needs them.`,
-          },
-        ],
-      };
+      return [
+        {
+          ...message,
+          content: [
+            {
+              type: 'text' as const,
+              text: `Earlier owner request (completed): "${heading}" - the full message, its metadata and its memory evidence stay saved; read them with history_search if this turn needs them.`,
+            },
+          ],
+        },
+      ];
     });
   };
   pi.on('context', ({ messages }) => ({ messages: prune(messages) }));
