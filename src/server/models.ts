@@ -1439,9 +1439,27 @@ export function createModelService(options: {
             label,
             status,
             managed,
-            ...(issue ? { issue } : {}),
+            // The card must name the SELECTED model's state, not a failure
+            // recorded for another model on the same connection: after the
+            // owner switches models, the old model's rejection (measured:
+            // a DeepSeek 403 shown while GLM was selected) must stop marking
+            // the card. Other models' failures stay visible per model.
+            ...(selection?.connectionId === id
+              ? (() => {
+                  const selectedIssue = service.issue({
+                    connectionId: id,
+                    modelId: selection.modelId,
+                  });
+                  return selectedIssue ? { issue: selectedIssue } : {};
+                })()
+              : issue
+                ? { issue }
+                : {}),
             models: models.map((model) => ({
               ...model.choice,
+              ...(service.issue({ connectionId: id, modelId: model.choice.id })
+                ? { issue: service.issue({ connectionId: id, modelId: model.choice.id }) }
+                : {}),
               pricing: modelPricing(model),
               ...(model.choice.audio
                 ? { textModelName: textCompanion({ provider, method, models })?.choice.name }
