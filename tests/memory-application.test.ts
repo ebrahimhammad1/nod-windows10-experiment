@@ -1704,7 +1704,7 @@ test(
       await admin.end();
     });
     await pool.query(`CREATE TABLE threads(id uuid PRIMARY KEY,owner_id text,archived_at timestamptz);
-      CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text,thread_id uuid,turn_id uuid,role text,text text,hidden_at timestamptz,created_at timestamptz);
+      CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text,thread_id uuid,turn_id uuid,role text,text text,stream_id text,hidden_at timestamptz,created_at timestamptz);
       CREATE TABLE turns(id uuid PRIMARY KEY,owner_id text,thread_id uuid,message_id uuid,prompt text,status text,source text,channel text,withdrawn boolean NOT NULL DEFAULT false,created_at timestamptz);
       CREATE TABLE preferences(owner_id text,time_zone text);`);
     const active = randomUUID(),
@@ -1759,6 +1759,16 @@ test(
       "INSERT INTO messages(id,owner_id,thread_id,role,text,hidden_at,created_at) VALUES($1,$2,$3,'user','Maple fair cedar elm.',now(),$4)",
       [hiddenId, 'owner-a', active, new Date(Date.UTC(2026, 0, 1, 0, 19, 30))],
     );
+    // An execution-ack receipt repeats real words but is chat UI, never a
+    // reply: it must stay out of matches, context windows and counts.
+    const ack = {
+      id: randomUUID(),
+      at: new Date(Date.UTC(2026, 0, 1, 0, 20, 30)),
+    };
+    await pool.query(
+      "INSERT INTO messages(id,owner_id,thread_id,role,text,stream_id,created_at) VALUES($1,$2,$3,'assistant','Maple fair cedar elm.',$4,$5)",
+      [ack.id, 'owner-a', active, `ack:${randomUUID()}`, ack.at],
+    );
     const search = createHistorySearch({ pool, ownerId: 'owner-a' });
     for (const order of ['relevance', 'newest']) {
       const found: string[] = [];
@@ -1770,6 +1780,7 @@ test(
           ...page.messages.filter((message) => message.match).map((message) => message.id),
         );
         assert.equal(page.complete, !page.nextCursor);
+        assert.ok(page.messages.every((message) => message.id !== ack.id));
         if (!page.nextCursor) break;
         cursor = page.nextCursor;
       }
@@ -1782,6 +1793,9 @@ test(
     await assert.rejects(search({ around: other.id }), /unavailable/);
     await assert.rejects(search({ around: old.id }), /unavailable/);
     await assert.rejects(search({ around: hiddenId }), /unavailable/);
+    const ackWindow = await search({ around: records[20].id });
+    assert.ok(ackWindow.messages.every((message) => message.id !== ack.id));
+    assert.ok(ackWindow.messages.length > 0);
     const datePage = await search({ from: '2026-01-01', to: '2026-01-01' });
     assert.equal(datePage.totalMatches, 45);
     const scoped = Array.from({ length: 10 }, (_, index) => ({
