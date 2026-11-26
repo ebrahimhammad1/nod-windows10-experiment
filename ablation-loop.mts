@@ -18,7 +18,7 @@ const server = createServer((req, res) => {
     calls++;
     const tailIsToolResult = /"role":"user","content":\[\{"type":"text","text":"Tool result/.test(raw.slice(-400));
     const reply = !tailIsToolResult
-      ? '{"tool":"memory","input":{"action":"memory_learn","messages":["my cat is Milo"]}}'
+      ? '{"tool":"memory","input":{"action":"memory_learn","args":{}}}'
       : 'Saved it - Milo.';
     const sse = `data: ${JSON.stringify({ choices: [{ delta: { content: reply } }], usage: { prompt_tokens: 1, completion_tokens: 1 } })}\n\ndata: [DONE]\n\n`;
     res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -39,6 +39,12 @@ const tools = Object.values(toolDefinitions as Record<string, any>).map((def: an
     const action = args?.action;
     if (!memoryActions.includes(action))
       return { content: [{ type: 'text' as const, text: `Error: memory needs a valid "action" (${memoryActions.join(', ')}); got ${JSON.stringify(action ?? null)}.` }] };
+      if (action === 'memory_learn' && args?.args !== undefined) {
+        const inner = args.args as Record<string, unknown>;
+        const keys = Object.keys(inner ?? {});
+        if (keys.length && !(keys.length === 1 && Array.isArray(inner.messages)))
+          return { content: [{ type: 'text' as const, text: `Error: memory_learn args must be {messages?: [message IDs]} - it reads the current owner message itself; got keys ${JSON.stringify(keys)}.` }] };
+      }
     const store = JSON.parse(await readFile(memoryFile, 'utf8').catch(() => '{"notes":[]}'));
     if (action === 'memory_learn') {
       store.notes.push({ at: new Date().toISOString(), args });

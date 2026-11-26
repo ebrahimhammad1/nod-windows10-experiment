@@ -99,6 +99,12 @@ async function run(mode: 'CURRENT' | 'MINIMAL' | 'ZERO', promptText: string) {
             text: `Error: memory needs a valid "action" (${memoryActions.join(', ')}); got ${JSON.stringify(action ?? null)}. memory_learn takes {messages?}.`,
           }],
         };
+      if (action === 'memory_learn' && args?.args !== undefined) {
+        const inner = args.args as Record<string, unknown>;
+        const keys = Object.keys(inner ?? {});
+        if (keys.length && !(keys.length === 1 && Array.isArray(inner.messages)))
+          return { content: [{ type: 'text' as const, text: `Error: memory_learn args must be {messages?: [message IDs]} - it reads the current owner message itself; got keys ${JSON.stringify(keys)}.` }] };
+      }
       const store = JSON.parse(await readFile(memoryFile, 'utf8').catch(() => '{"notes":[]}'));
       if (action === 'memory_learn') {
         store.notes.push({ at: new Date().toISOString(), args });
