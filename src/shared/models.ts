@@ -90,7 +90,9 @@ export interface ModelPricing {
 export interface ModelSelection {
   connectionId: string;
   modelId: string;
-  effort: ModelEffort;
+  // 'auto' is a stored MODE resolved per request (resolveSelectionEffort);
+  // providers only ever see a concrete ModelEffort.
+  effort: ModelEffort | 'auto';
 }
 
 export type ModelLane = 'schedule' | 'background';

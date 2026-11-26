@@ -35,9 +35,11 @@ import {
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import { createPiModelRuntime } from './models.ts';
+import { resolveSelectionEffort } from '../../shared/model-defaults.ts';
 import { createTurnFallback, modelKey } from './fallback.ts';
 import {
   estimateRequestTokens,
+  estimatedRequestTokens,
   knownOutputQuota,
   noteObservedOutput,
   outputBudgetWaitMs,
@@ -1324,6 +1326,20 @@ export function createPiAgent(options: {
         // Single-connection turns have no fallback to preflight per candidate,
         // so refuse doomed requests and learn provider-reported limits here.
         const quotaKey = turnModels.get(input.turnId) ?? (access ? modelKey(access) : undefined);
+        // Auto effort resolves HERE, per request, where the turn's actual
+        // payload and the learned quotas are both visible: simple turns and
+        // tight connections stay light, substantial tasks get the provider
+        // default - without any extra classification call. Manual levels are
+        // never touched (access.effortAuto is only set for stored 'auto').
+        if (!fallback && quotaKey && access?.effortAuto) {
+          session.setThinkingLevel(
+            resolveSelectionEffort(access.provider, access.definition.choice, 'auto', {
+              estimatedInputTokens: estimatedRequestTokens(quotaKey, context),
+              inputQuotaPerMinute: knownRequestQuota(quotaKey)?.limit,
+              outputQuotaPerMinute: knownOutputQuota(quotaKey)?.limit,
+            }),
+          );
+        }
         if (!fallback && quotaKey) {
           const refused = quotaPreflightError(quotaKey, context);
           if (refused) throw refused;

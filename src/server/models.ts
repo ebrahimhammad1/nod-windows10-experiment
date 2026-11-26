@@ -19,6 +19,7 @@ import type {
   ModelLane,
   ModelMethod,
   ModelChoice,
+  ModelEffort,
   ModelProvider,
   ModelRoute,
   ModelRoutes,
@@ -51,6 +52,7 @@ import {
   defaultEffort,
   defaultModel,
   memoryModels,
+  resolveSelectionEffort,
 } from '../shared/model-defaults.ts';
 import { createDatabaseModelStore, type ModelRecord, type ModelState } from './model-store.ts';
 import { analyticsModel, snapshotAnalytics, type CaptureAnalytics } from './analytics.ts';
@@ -77,7 +79,10 @@ export const modelSelectionInput = z
   .object({
     connectionId: z.uuid(),
     modelId: z.string().min(1).max(200),
-    effort: z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
+    effort: z.union([
+      z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
+      z.literal('auto'),
+    ]),
   })
   .strict();
 class ConnectionError extends ModelRequestError {}
@@ -279,7 +284,9 @@ function usable(
         row.models.some(
           (model) =>
             model.choice.id === selection.modelId &&
-            model.choice.efforts.includes(selection.effort) &&
+            (selection.effort === 'auto'
+              ? model.choice.efforts.length > 0
+              : model.choice.efforts.includes(selection.effort)) &&
             (!model.choice.audio || Boolean(textCompanion(row))),
         ),
     )
@@ -720,13 +727,31 @@ export function createModelService(options: {
       (auxiliary
         ? row.models.find((model) => model.choice.id === memoryModels[row.provider])
         : undefined) ?? row.models.find((model) => model.choice.id === selected.modelId);
-    if (!definition || (!definition.choice.efforts.includes(selected.effort) && !auxiliary))
+    if (!definition)
+      throw new ConnectionError(
+        `The selected model is unavailable on this connection (${row.provider} / ${selected.modelId}). Reload its models or choose another model in ${appPages['/settings/models']}.`,
+      );
+    // 'auto' resolves to a concrete level here (base resolution, no request
+    // signal yet); the request-time layer adapts it per payload - see
+    // access.effortAuto.
+    const effortAuto = !auxiliary && selected.effort === 'auto';
+    const resolvedEffort: ModelEffort =
+      selected.effort === 'auto'
+        ? resolveSelectionEffort(row.provider, definition.choice, 'auto')
+        : selected.effort;
+    if (!definition.choice.efforts.includes(resolvedEffort) && !auxiliary)
       throw new ConnectionError(
         `The selected model is unavailable on this connection (${row.provider} / ${selected.modelId}). Reload its models or choose another model in ${appPages['/settings/models']}.`,
       );
     const companion = definition.choice.audio ? textCompanion(row) : undefined;
     if (definition.choice.audio && !companion) throw missingTextCompanion();
-    return { selected, row, definition, companion };
+    return {
+      selected: { connectionId: selected.connectionId, modelId: selected.modelId, effort: resolvedEffort },
+      effortAuto,
+      row,
+      definition,
+      companion,
+    };
   }
   function unpricedPreparationModel() {
     try {
@@ -760,7 +785,13 @@ export function createModelService(options: {
     const definition =
       row?.status === 'connected' &&
       row.models.find((item) => item.choice.id === value.modelId && !item.choice.audio);
-    if (!row || !definition || !definition.choice.efforts.includes(value.effort))
+    if (
+      !row ||
+      !definition ||
+      (value.effort === 'auto'
+        ? !definition.choice.efforts.length
+        : !definition.choice.efforts.includes(value.effort))
+    )
       throw Object.assign(new ConnectionError('Choose an available text model and effort.'), {
         statusCode: 400,
       });
@@ -971,12 +1002,14 @@ export function createModelService(options: {
     const choice = choices.find((model) => model.id === selected?.modelId);
     if (
       selected?.connectionId === id &&
+      selected.effort !== 'auto' &&
       choice?.efforts.length &&
       !choice.efforts.includes(selected.effort)
     )
       selected.effort = lightestEffort(choice.efforts);
     for (const route of Object.values(state.routes)) {
       if (!route || route === 'light' || route.connectionId !== id) continue;
+      if (route.effort === 'auto') continue;
       const routed = choices.find((model) => model.id === route.modelId);
       if (routed?.efforts.length && !routed.efforts.includes(route.effort))
         route.effort = lightestEffort(routed.efforts);
@@ -1343,7 +1376,12 @@ export function createModelService(options: {
       const definition = row?.models.find((model) => model.choice.id === work.selection.modelId);
       if (row?.status !== 'connected' || !definition || definition.choice.audio)
         throw unavailable(work, origin.kind, row);
-      if (definition.choice.efforts.includes(work.selection.effort)) return work;
+      if (
+        work.selection.effort === 'auto'
+          ? definition.choice.efforts.length > 0
+          : definition.choice.efforts.includes(work.selection.effort)
+      )
+        return work;
       return {
         ...work,
         selection: { ...work.selection, effort: defaultEffort(row.provider, definition.choice) },
@@ -1364,9 +1402,12 @@ export function createModelService(options: {
             definition,
             effort: auxiliary
               ? auxiliaryEffort(definition.choice.efforts)
-              : definition.choice.efforts.includes(item.effort)
-                ? item.effort
-                : defaultEffort(row.provider, definition.choice),
+              : item.effort === 'auto'
+                ? resolveSelectionEffort(row.provider, definition.choice, 'auto')
+                : definition.choice.efforts.includes(item.effort)
+                  ? item.effort
+                  : defaultEffort(row.provider, definition.choice),
+            ...(item.effort === 'auto' && !auxiliary ? { effortAuto: true as const } : {}),
             ...requestAccess(row),
             needsReconnect: (credential) =>
               needsReconnect(row.id, { models: row.models, credential }),
@@ -1469,6 +1510,26 @@ export function createModelService(options: {
           }),
         ),
         selection,
+        // With a stored 'auto' the owner sees the level it currently
+        // resolves to; the request-time layer may adapt it further per turn.
+        ...(selection?.effort === 'auto'
+          ? (() => {
+              const sel = selection;
+              const row = rows.find((item) => item.id === sel.connectionId);
+              const definition = row?.models.find(
+                (model) => model.choice.id === sel.modelId,
+              );
+              return row && definition
+                ? {
+                    resolvedEffort: resolveSelectionEffort(
+                      row.provider,
+                      definition.choice,
+                      'auto',
+                    ),
+                  }
+                : {};
+            })()
+          : {}),
         ...(selectionIssue ? { selectionIssue } : {}),
         routes,
         backups,
@@ -1582,7 +1643,13 @@ export function createModelService(options: {
           const model =
             row?.status === 'connected' &&
             row.models.find((item) => item.choice.id === value.modelId);
-          if (!row || !model || !model.choice.efforts.includes(value.effort))
+          if (
+            !row ||
+            !model ||
+            (value.effort === 'auto'
+              ? !model.choice.efforts.length
+              : !model.choice.efforts.includes(value.effort))
+          )
             throw new ConnectionError('Choose an available model and effort.');
           if (model.choice.audio && !textCompanion(row)) throw missingTextCompanion();
           const changed = {
@@ -1722,13 +1789,14 @@ export function createModelService(options: {
       auxiliary = false,
       choice: ModelSelection | null = selection,
     ): Promise<ModelAccess> {
-      const { selected, row, definition, companion } = chosen(auxiliary, choice);
+      const { selected, effortAuto, row, definition, companion } = chosen(auxiliary, choice);
       return {
         connectionId: row.id,
         provider: row.provider,
         method: row.method,
         definition,
         effort: auxiliary ? auxiliaryEffort(definition.choice.efforts) : selected.effort,
+        ...(effortAuto ? { effortAuto } : {}),
         ...(companion
           ? {
               textModel: {

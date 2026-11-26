@@ -103,6 +103,12 @@ export function noteObservedUsage(key: string, rawEstimate: number, realTokens: 
   calibration.set(key, prior === undefined ? factor : prior * 0.5 + factor * 0.5);
 }
 
+// The calibrated per-connection estimate, for request-time decisions that
+// need the same number the preflight uses (e.g. Auto effort resolution).
+export function estimatedRequestTokens(key: string, context: Context): number {
+  return calibratedEstimate(key, context);
+}
+
 function calibratedEstimate(key: string, context: Context): number {
   const raw = estimateRequestTokens(context);
   const factor = calibration.get(key);

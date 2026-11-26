@@ -75,30 +75,74 @@ export function defaultEffort(provider: ModelProvider, model: ModelChoice): Mode
 }
 
 /**
- * The one effort value that is a MODE, not a level. Stored selections may
- * carry 'auto'; providers only ever receive the concrete level this helper
- * resolves to. Policy (no extra LLM classification calls by default):
- *   - a model with a single effort level resolves to it;
- *   - a zero-priced or unpriced/'variable' model resolves to the provider
- *     default (full capability - no cost or quota reason to degrade);
- *   - a priced model resolves to the lightest level (cost guard).
- * The level always comes from the model's OWN effort list - a level the
- * provider does not support is never invented.
- * Known limit: per-task complexity is not visible at selection-resolution
- * time, so this v1 does not adapt within a connection by request size; the
- * payload-estimate layer is the future seam for that signal.
+ * Signals the request-time layer can see when resolving Auto: the estimated
+ * size of THIS turn's payload (task complexity, no LLM classification call)
+ * and the connection's learned per-minute quotas (headroom).
+ */
+export interface EffortSignal {
+  estimatedInputTokens?: number;
+  inputQuotaPerMinute?: number;
+  outputQuotaPerMinute?: number;
+}
+
+// A turn at or below this estimate is simple (a greeting, a short question)
+// and needs no reasoning depth.
+export const AUTO_SIMPLE_TASK_TOKENS = 2048;
+// At or above this estimate the task is substantial enough to justify the
+// provider default level even on a priced connection.
+export const AUTO_SUBSTANTIAL_TASK_TOKENS = 8192;
+// Tight-quota guards, from measured free-tier limits (Groq: 7,000 input /
+// 1,000 output tokens per minute): reasoning effort spends the same scarce
+// per-minute output window the reply itself needs, so tight connections
+// stay light.
+export const AUTO_TIGHT_INPUT_QUOTA = 8000;
+export const AUTO_TIGHT_OUTPUT_QUOTA = 1000;
+
+/**
+ * 'auto' is a selection MODE, not a level. Stored selections may carry it;
+ * providers only ever receive the concrete level this resolves to. Policy
+ * (no extra LLM classification calls by default, in order):
+ *   1. a model with a single effort level resolves to it;
+ *   2. a tight learned quota keeps the lightest level (reasoning would burn
+ *      the scarce per-minute output window - measured on the free tier);
+ *   3. a simple turn (small estimated payload) keeps the lightest level;
+ *   4. a priced model keeps the lightest level unless the task is
+ *      substantial (cost guard);
+ *   5. otherwise the provider default.
+ * Auto never EXCEEDS the provider default and the level always comes from
+ * the model's OWN effort list - nothing provider-unsupported is invented.
+ * Called once per request at the payload layer, where the turn's content
+ * and the learned quotas are both visible.
  */
 export function resolveSelectionEffort(
   provider: ModelProvider,
   model: ModelChoice,
   effort: ModelEffort | 'auto',
+  signal: EffortSignal = {},
 ): ModelEffort {
   if (effort !== 'auto') return effort;
   if (!model.efforts.length) throw new Error(`Model ${model.id} supports no effort levels.`);
   if (model.efforts.length === 1) return model.efforts[0]!;
+  const lightest = lightestEffort(model.efforts);
+  const tightInput =
+    signal.inputQuotaPerMinute !== undefined &&
+    signal.inputQuotaPerMinute <= AUTO_TIGHT_INPUT_QUOTA;
+  const tightOutput =
+    signal.outputQuotaPerMinute !== undefined &&
+    signal.outputQuotaPerMinute <= AUTO_TIGHT_OUTPUT_QUOTA;
+  if (tightInput || tightOutput) return lightest;
+  if (
+    signal.estimatedInputTokens !== undefined &&
+    signal.estimatedInputTokens <= AUTO_SIMPLE_TASK_TOKENS
+  )
+    return lightest;
   const pricing = model.pricing;
-  const free = pricing && pricing !== 'variable' && pricing.input + pricing.output === 0;
-  return free || !pricing || pricing === 'variable'
-    ? defaultEffort(provider, model)
-    : lightestEffort(model.efforts);
+  const priced = pricing && pricing !== 'variable' && pricing.input + pricing.output > 0;
+  if (
+    priced &&
+    (signal.estimatedInputTokens === undefined ||
+      signal.estimatedInputTokens < AUTO_SUBSTANTIAL_TASK_TOKENS)
+  )
+    return lightest;
+  return defaultEffort(provider, model);
 }
