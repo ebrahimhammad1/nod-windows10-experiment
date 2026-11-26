@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { createPiAgent } from './src/providers/pi/index.ts';
 import { toolDefinitions } from './src/runtime/tools.ts';
 import { systemPrompt } from './src/runtime/prompt.ts';
-import { learnRequestQuota } from './src/providers/pi/request-quota.ts';
+import { learnOutputQuota, learnRequestQuota } from './src/providers/pi/request-quota.ts';
 
 const key = (await readFile(process.env.GROQ_KEY_FILE!, 'utf8')).trim();
 const BASE = 'https://api.groq.com/openai/v1';
@@ -116,6 +116,11 @@ async function run(mode: 'CURRENT' | 'MINIMAL', promptText: string) {
       learnRequestQuota(
         `compatible/api_key/${MODEL}`,
         `Request too large for model \`${MODEL}\` on input tokens per minute (ITPM): Limit ${process.env.NOD_BENCH_LEARN}, Requested 99999. Please reduce your message size.`,
+      );
+    if (process.env.NOD_BENCH_LEARN_OUTPUT)
+      learnOutputQuota(
+        `compatible/api_key/${MODEL}`,
+        `Request too large for model \`${MODEL}\` on output tokens per minute (OTPM): Limit ${process.env.NOD_BENCH_LEARN_OUTPUT}, Requested 99999.`,
       );
     await session.prompt(promptText, []);
     await session.dispose();
