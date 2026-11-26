@@ -477,6 +477,61 @@ function planBilled(event: AgentEvent): AgentEvent {
       : event;
 }
 
+/**
+ * Zero-definition protocol (NOD_TOOL_LOADOUT=zero, local review): the model's
+ * ENTIRE reply must be one JSON object {"tool":"NAME","input":{...}} (a
+ * ```json fence is tolerated). Anything else is a normal reply, not a
+ * command - strict on purpose, so prose is never mistaken for a tool call.
+ */
+export function zeroToolCommand(
+  reply: string,
+): { tool: string; input?: Record<string, unknown> } | undefined {
+  const unfenced = reply
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim();
+  if (!unfenced.startsWith('{') || !unfenced.endsWith('}')) return undefined;
+  try {
+    const parsed = JSON.parse(unfenced) as { tool?: unknown; input?: unknown };
+    if (typeof parsed?.tool !== 'string' || !parsed.tool) return undefined;
+    if (
+      parsed.input !== undefined &&
+      (typeof parsed.input !== 'object' || parsed.input === null || Array.isArray(parsed.input))
+    )
+      return undefined;
+    return { tool: parsed.tool, input: parsed.input as Record<string, unknown> | undefined };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * On-demand discovery for the zero-definition protocol: rank the LOCAL
+ * deferred-tool catalog by the query and return at most five name +
+ * description + schema entries. This is the same definition data
+ * nod_tool_search searches; only what was asked for enters the conversation.
+ */
+export function zeroToolCatalog(tools: ToolDefinition[], query: string) {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const ranked = tools
+    .filter((tool) => tool.exposure === 'deferred')
+    .map((tool) => {
+      const entry = {
+        name: tool.name,
+        description: (tool.description ?? '').slice(0, 160),
+        parameters: tool.parameters,
+      };
+      const haystack = `${tool.name} ${tool.description ?? ''}`.toLowerCase();
+      const score = words.length ? words.filter((word) => haystack.includes(word)).length : 1;
+      return { entry, score };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+  return { tools: ranked.map((item) => item.entry) };
+}
+
 export function createPiAgent(options: {
   provider: string;
   resolve?: (choice?: ModelSelection) => Promise<ModelAccess | ModelAccess[]>;
@@ -782,6 +837,15 @@ export function createPiAgent(options: {
       // definitions with their validation and execution paths unchanged.
       const minimalLoadout =
         process.env.NOD_TOOL_LOADOUT === 'minimal' && !input.restricted && !budget.compact;
+      // Local-review ZERO-DEFINITION loadout (NOD_TOOL_LOADOUT=zero): no tool
+      // schemas are declared at all. The system prompt carries only a compact
+      // command protocol; the turn loop in prompt() parses one-JSON-object
+      // replies, executes them locally through the same nod_tool gateway
+      // (validation, approvals and output bounding unchanged), and feeds the
+      // bounded result back. This measures the floor of the tools-isolation
+      // architecture: definitions never ride the request unless retrieved.
+      const zeroLoadout =
+        process.env.NOD_TOOL_LOADOUT === 'zero' && !input.restricted && !budget.compact;
       const compactTools = [
         ...sandboxTools.map((tool) => tool.name),
         'nod_tool_search',
@@ -848,6 +912,7 @@ export function createPiAgent(options: {
           ...((!input.restricted && !tool.eager) ||
           tool.deferred ||
           budget.compact ||
+          zeroLoadout ||
           (minimalLoadout && !['send_message', 'ask_user'].includes(tool.name))
             ? {
                 exposure: 'deferred' as const,
@@ -906,7 +971,7 @@ export function createPiAgent(options: {
           required: ['name', 'args'],
           additionalProperties: false,
         } as ToolDefinition['parameters'],
-        exposure: 'direct' as const,
+        exposure: zeroLoadout ? ('deferred' as const) : ('direct' as const),
         executionMode: 'sequential' as const,
         execute: async (id, args, signal, onUpdate, context) => {
           const { name, args: forwarded } = (args ?? {}) as {
@@ -1228,6 +1293,10 @@ export function createPiAgent(options: {
           'Use nod_browser for browser calls. In older procedures, browser means this tool.',
         );
       if (deferred) guidelines.push('Use nod_tool_search to load deferred tools.');
+      if (zeroLoadout)
+        guidelines.push(
+          'No tools are declared in this chat. To use one, make your ENTIRE reply exactly one JSON object and nothing else: {"tool":"NAME","input":{...}}. Discover names and input shapes first with {"tool":"nod_tool_search","input":{"query":"what you need"}}. Tool results arrive as user messages; then answer normally or send another command.',
+        );
       const systemPrompt = guidelines.length
         ? `${input.systemPrompt}\n\nTool guidelines:\n${guidelines.map((rule) => `- ${rule}`).join('\n')}`
         : input.systemPrompt;
@@ -1268,6 +1337,9 @@ export function createPiAgent(options: {
             .map(([name]) => name),
         ),
       ];
+      // Zero-definition mode declares nothing: discovery and calls run
+      // through the protocol loop below instead of provider-visible schemas.
+      if (zeroLoadout) directTools.length = 0;
       // Turn-scoped loadout: the always-on set is everything with direct
       // exposure. Tools loaded on demand (nod_tool_search, companions) stay
       // active for the turn that loaded them and are evicted at the next
@@ -1673,7 +1745,49 @@ export function createPiAgent(options: {
               await session.sendCustomMessage(audioMessage(text, images, audio), {
                 triggerTurn: true,
               });
-            else await session.prompt(text, { images, expandPromptTemplates: false });
+            else {
+              await session.prompt(text, { images, expandPromptTemplates: false });
+              if (zeroLoadout) {
+                const gateway = tools.find((tool) => tool.name === 'nod_tool');
+                for (let round = 0; round < 4 && !disposed && gateway; round++) {
+                  if (input.shouldStop?.()) break;
+                  const messages = manager.buildSessionContext().messages;
+                  const last = messages.findLast(
+                    (message) => (message as { role?: string }).role === 'assistant',
+                  );
+                  const reply = contentText(
+                    (last as { content?: unknown } | undefined)?.content as never,
+                  ).trim();
+                  const command = zeroToolCommand(reply);
+                  if (!command) break;
+                  let result: unknown;
+                  try {
+                    result =
+                      command.tool === 'nod_tool_search'
+                        ? zeroToolCatalog(tools, String(command.input?.query ?? ''))
+                        : await gateway.execute(
+                            `zero-${round}`,
+                            { name: command.tool, args: command.input ?? {} } as never,
+                            new AbortController().signal,
+                            undefined as never,
+                            undefined as never,
+                          );
+                  } catch (error) {
+                    result = { error: error instanceof Error ? error.message : String(error) };
+                  }
+                  const serialized =
+                    contentText((result as { content?: unknown } | undefined)?.content as never) ||
+                    JSON.stringify(result) ||
+                    'null';
+                  // Bounded like any tool result: an unbounded echo would
+                  // re-inflate the very next request past the limit.
+                  await session.prompt(
+                    `Tool result (${command.tool}):\n${serialized.slice(0, 4000)}`,
+                    { expandPromptTemplates: false },
+                  );
+                }
+              }
+            }
           } finally {
             settings.applyOverrides({ compaction: budget.compaction });
             if (dropFailedInput(manager)) session.refreshContext();
