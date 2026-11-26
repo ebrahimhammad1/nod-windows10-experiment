@@ -10045,6 +10045,87 @@ test('a new request after the cache went cold leaves large earlier tool results 
   assert.ok((await localText(join(directory, threadId))).includes('LARGE-RESULT-1'));
 });
 
+test('completed owner envelopes collapse to step markers and the last exchange stays verbatim', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-earlier-envelopes-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const requests: string[][] = [];
+  const script: string[] = [];
+  const agent = createPiAgent({
+    provider: 'openai',
+    apiKey: 'fixture-key',
+    sessionRoot: directory,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      result.session.setActiveToolsByName(result.session.getAllTools().map((tool) => tool.name));
+      result.session.agent.streamFunction = (model, context) => {
+        requests.push(context.messages.map((message) => JSON.stringify(message)));
+        const step = script.shift() ?? 'answer';
+        const message: AssistantMessage = {
+          ...fauxAssistantMessage([{ type: 'text', text: `Conclusion ${requests.length}.` }]),
+          provider: model.provider,
+          model: model.id,
+          api: model.api,
+          stopReason: 'stop',
+          timestamp: Date.now(),
+        };
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: 'done', reason: 'stop', message });
+        return stream;
+      };
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const threadId = randomUUID();
+  const envelope = (instruction: string) =>
+    `Current local time: 2026-11-26T14:00:00+02:00. User time zone: Africa/Cairo.\nRequest data (JSON):\n${JSON.stringify(
+      {
+        mode: 'conversation',
+        task: null,
+        taskLedger: [],
+        channel: 'web',
+        memoryForThisRequest: `<frozen memory snapshot for ${instruction}>`,
+        recentConversation: [{ role: 'user', text: `frozen recent snapshot for ${instruction}` }],
+        currentInstruction: instruction,
+      },
+    )}`;
+  const turn = async (instruction: string) => {
+    script.push('answer');
+    const session = await agent.open({
+      ...fakeExecution(threadId, randomUUID()),
+      newRequest: true,
+      systemPrompt: 'Fixture system',
+      ...sandbox,
+      tools: [],
+      shouldStop: () => false,
+      onEvent() {},
+    });
+    await session.prompt(envelope(instruction), []);
+    await session.dispose();
+    await setTimeout(2);
+  };
+  await turn('first task');
+  await turn('second task');
+  await turn('third task');
+  await turn('fourth task');
+  const latest = requests[3]!.join('\n');
+  // Completed turns collapse to one-line step markers with a retrieval pointer.
+  assert.equal(latest.split('Earlier owner request (completed):').length - 1, 2);
+  assert.match(latest, /Earlier owner request \(completed\): \\"first task\\"/);
+  assert.match(latest, /Earlier owner request \(completed\): \\"second task\\"/);
+  assert.ok(latest.includes('history_search'));
+  // Their frozen snapshots leave the context with the envelope.
+  assert.equal(latest.includes('frozen memory snapshot for first task'), false);
+  assert.equal(latest.includes('frozen recent snapshot for second task'), false);
+  // The last exchange and the current message stay verbatim.
+  assert.ok(latest.includes('\\"currentInstruction\\":\\"third task\\"'));
+  assert.ok(latest.includes('\\"currentInstruction\\":\\"fourth task\\"'));
+  assert.ok(latest.includes('frozen memory snapshot for third task'));
+  // Originals stay in the session store: pointer retrieval reads them whole.
+  const stored = await localText(join(directory, threadId));
+  assert.ok(stored.includes('frozen memory snapshot for first task'));
+});
+
 test('a spilled tool output points at its file and the optional script path', async () => {
   const { createContextOutput } = await import('../src/providers/pi/context-output.ts');
   const output = createContextOutput(

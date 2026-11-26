@@ -501,6 +501,60 @@ function duplicateResults(pi: ExtensionAPI) {
   });
 }
 
+/**
+ * Earlier owner envelopes (the owner's retrieval-first design): every owner
+ * request arrives wrapped in a per-turn envelope - local-time header, request
+ * JSON, and frozen recentConversation / memoryForThisRequest snapshots.
+ * Replayed verbatim every turn, those frozen snapshots compound (measured
+ * ~60% of late-turn requests, ~1,800 est. tokens of growth per message). Only
+ * the current message and the last exchange stay verbatim; each completed
+ * turn's envelope collapses to a one-line step marker with a retrieval
+ * pointer. Originals stay in the session store and in the message database
+ * (history_search reads them), and owner authority is validated against
+ * message rows, never against replayed context, so this rewrite changes
+ * context size only. The rewrite is deterministic per envelope, so replayed
+ * prefixes stay byte-identical across later requests.
+ */
+const envelopeInstruction = /"currentInstruction":"((?:[^"\\]|\\.)*)"/;
+
+function earlierEnvelopes(pi: ExtensionAPI) {
+  const prune = <T extends { role: string }>(messages: T[]) => {
+    const envelopes = messages.flatMap((message, index) =>
+      message.role === 'user' &&
+      envelopeInstruction.test(
+        contentText((message as unknown as { content: Parameters<typeof contentText>[0] }).content),
+      )
+        ? [index]
+        : [],
+    );
+    // Current message plus the last exchange stay verbatim.
+    const keepFrom = envelopes.length <= 2 ? messages.length : envelopes[envelopes.length - 2]!;
+    if (keepFrom >= messages.length) return messages;
+    return messages.map((message, index) => {
+      if (index >= keepFrom || !envelopes.includes(index)) return message;
+      const text = contentText(
+        (message as unknown as { content: Parameters<typeof contentText>[0] }).content,
+      );
+      const instruction = text.match(envelopeInstruction)?.[1] ?? '';
+      const heading = instruction.length > 100 ? `${instruction.slice(0, 100)}…` : instruction;
+      return {
+        ...message,
+        content: [
+          {
+            type: 'text' as const,
+            text: `Earlier owner request (completed): "${heading}" - the full message, its metadata and its memory evidence stay saved; read them with history_search if this turn needs them.`,
+          },
+        ],
+      };
+    });
+  };
+  pi.on('context', ({ messages }) => ({ messages: prune(messages) }));
+  pi.on('session_before_compact', ({ preparation }) => {
+    preparation.messagesToSummarize = prune(preparation.messagesToSummarize);
+    preparation.turnPrefixMessages = prune(preparation.turnPrefixMessages);
+  });
+}
+
 function completeAssistantMessages(pi: ExtensionAPI) {
   pi.on('message_end', ({ message }) => {
     if (message.role !== 'assistant') return;
@@ -1153,6 +1207,7 @@ export function createPiAgent(options: {
             : []),
           earlierResults(requestStart(manager)),
           duplicateResults,
+          earlierEnvelopes,
           recentImages,
           draft2020Tools,
           audioContext(manager, readsNativeAudio(model) && Boolean(input.readAudio)),
