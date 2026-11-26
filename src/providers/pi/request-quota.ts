@@ -131,8 +131,13 @@ const RETRY_HINT_PATTERNS = [
   /retry in\s+([\d.]+)\s*s/i,
   /retryDelay["']?\s*:\s*"?([\d.]+)s"?/i,
 ];
+// A hint alone is not enough: the error must actually be a 429 pacing
+// rejection, or an unrelated error that happens to contain "retry in Ns"
+// would trigger a provider retry. Groq says "Rate limit reached"; Gemini
+// says "HTTP 429 ... Too Many Requests ... RESOURCE_EXHAUSTED".
+const RATE_LIMIT_ERROR_PATTERN = /\b429\b|too many requests|rate.?limit|resource_exhausted/i;
 export function retryableRateLimitWait(text: string | undefined): number | undefined {
-  if (!text) return undefined;
+  if (!text || !RATE_LIMIT_ERROR_PATTERN.test(text)) return undefined;
   for (const pattern of RETRY_HINT_PATTERNS) {
     const match = text.match(pattern);
     if (!match) continue;

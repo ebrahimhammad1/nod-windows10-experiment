@@ -282,9 +282,14 @@ test('the retry-hint parser reads Groq and Gemini pacing text and refuses long w
     'a daily quota has no seconds hint within the cap and must fail clearly',
   );
   assert.equal(
-    retryableRateLimitWait('Please retry in 45.5s.'),
+    retryableRateLimitWait('HTTP 429 Please retry in 45.5s.'),
     undefined,
     'a hint beyond the 30s cap fails clearly instead of being truncated',
+  );
+  assert.equal(
+    retryableRateLimitWait('Please retry in 5.5s.'),
+    undefined,
+    'an unrelated error with retry wording but no 429 marker must not retry',
   );
 });
 
