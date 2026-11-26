@@ -40,3 +40,14 @@ Findings (2026-11-26, cand @ 1a8db493):
   compatible models always get reasoning:false -> efforts ["off"] only
   (pi-ai getSupportedThinkingLevels), so the picker (and Auto) never shows
   for custom-endpoint connections in the real app.
+
+Update (same day): the mock now also speaks the SUPPORTED Ollama discovery
+convention: GET /api/version + POST /api/show with
+`thinking.values: [false, "low", "high"]`. Nod's real catalog then exposes
+efforts off/low/high for the fixture model (this is the metadata path by
+which custom endpoints declare effort levels; without it models are
+off-only and the picker hides). With it, the real app composer shows the
+effort toggle, the menu opens ABOVE the composer with Auto first
+("Lighter on simple requests, never above default"), and selecting Auto
+persists effort:auto through the real backend (verified via GET /api/models).
+cdp_auto.mjs opens the picker and selects Auto.

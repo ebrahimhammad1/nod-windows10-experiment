@@ -20,12 +20,24 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
     def do_GET(self):
-        if self.path.endswith('/models'):
+        if self.path.endswith('/api/version'):
+            self._json({"version": "0.0.0-fixture"})
+        elif self.path.endswith('/models'):
             self._json({"object": "list", "data": [
                 {"id": "fixture-pro-1", "object": "model", "context_window": 32768}]})
         else:
             self._json({"error": "not found"}, 404)
     def do_POST(self):
+        if self.path.endswith('/api/show'):
+            length = int(self.headers.get('Content-Length', 0))
+            self.rfile.read(length)
+            self._json({
+                "capabilities": ["completion", "thinking", "tools"],
+                "model_info": {"fixture.context_length": 32768},
+                "parameters": "",
+                "thinking": {"values": [False, "low", "high"]},
+            })
+            return
         if not self.path.endswith('/chat/completions'):
             self._json({"error": "not found"}, 404)
             return
