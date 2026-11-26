@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   compactHistory,
   firstInstruction,
+  lastTurnHistory,
   retrievalFirstTurn,
   systemPrompt,
 } from '../src/runtime/prompt.ts';
@@ -89,7 +90,7 @@ test('a retrieval-first request injects only the recent window plus a retrieval 
   assert.ok(!light.includes('FINAL DECISION'));
 });
 
-test('retrieval-first task ledger carries only open-work locators', () => {
+test('a retrieval-first request sends no task data; tasks load through the task tool', () => {
   const tasks: any = [
     {
       id: 't1',
@@ -102,12 +103,38 @@ test('retrieval-first task ledger carries only open-work locators', () => {
     { id: 't2', title: 'Old task', status: 'done', closedAt: new Date().toISOString(), result: 'r' },
   ];
   const light = firstInstruction(baseContext({ tasks, retrievalFirst: true }), false, new Set());
-  assert.match(light, /Book the trip/);
-  assert.ok(!light.includes('long progress text'), 'bulky progress must not be injected');
-  assert.ok(!light.includes('which hotel?'), 'task questions load via the task list');
-  assert.ok(!light.includes('Old task'), 'closed tasks are not in the locator');
+  assert.ok(!light.includes('Book the trip'), 'no per-task locator lines');
+  assert.ok(!light.includes('long progress text'));
+  assert.ok(!light.includes('which hotel?'));
+  assert.match(light, /"taskLedger":\[\]/);
+  assert.match(light, /task list reads open work/, 'the navigation pointer remains');
   const full = firstInstruction(baseContext({ tasks }), false, new Set());
   assert.match(full, /long progress text/);
+});
+
+test('the retrieval-first recent window keeps only the last exchange plus the current message', () => {
+  const history = [
+    message('user', 'old question one', 40),
+    message('assistant', 'old answer one', 39),
+    message('user', 'previous question two', 30),
+    message('assistant', 'previous answer two', 29),
+    message('user', 'current message three', 20),
+  ];
+  const windowed = lastTurnHistory(history);
+  assert.deepEqual(
+    windowed.map((item) => item.text),
+    ['previous question two', 'previous answer two', 'current message three'],
+  );
+  const prompt = firstInstruction(
+    baseContext({ history: windowed, retrievalFirst: true }),
+    false,
+    new Set(),
+  );
+  assert.ok(!prompt.includes('old question one'), 'older exchanges are not injected');
+  assert.match(prompt, /previous question two/);
+  // First conversation turn: no prior exchange exists, nothing is dropped.
+  const first = lastTurnHistory([message('user', 'current message three', 20)]);
+  assert.equal(first.length, 1);
 });
 
 test('the system prompt guide describes retrieval, not a digest', () => {

@@ -35,6 +35,7 @@ import { BrowserActionError } from '../ports/computer.ts';
 import { threadIdentity } from '../ports/thread-identity.ts';
 import {
   compactHistory,
+  lastTurnHistory,
   compactMemory,
   compactOwnerContext,
   firstInstruction,
@@ -1339,19 +1340,22 @@ export function createAgentRuntime(dependencies: {
       const requestContext = compact
         ? {
             ...context,
-            history: compactHistory(context.history),
+            history: retrievalFirst
+              ? lastTurnHistory(compactHistory(context.history))
+              : compactHistory(context.history),
             relatedConversation: undefined,
             ...(retrievalFirst
-              ? // The locator in the prompt already reduces tasks to id/title/status.
-                { retrievalFirst: true, memoryBrief: undefined }
+              ? // The prompt sends no task data; the task tool lists open work on demand.
+                { retrievalFirst: true, memoryBrief: undefined, tasks: [] }
               : { tasks: [], memoryBrief: context.memoryBrief && compactMemory(context.memoryBrief) }),
           }
         : retrievalFirst
           ? {
               ...context,
-              history: compactHistory(context.history),
+              history: lastTurnHistory(compactHistory(context.history)),
               memoryBrief: undefined,
               retrievalFirst: true,
+              tasks: [],
             }
           : context;
       const observer = context.proactivity

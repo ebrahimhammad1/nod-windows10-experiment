@@ -105,6 +105,21 @@ ${context.memory?.startsWith('savingEnabled: false') ? 'savingEnabled: false\n' 
 ${mcpContext(context.mcpServers ?? [], true)}`;
 }
 
+// The always-sent recent window for a retrieval-first turn: the last
+// completed exchange plus the current message. One exchange preserves
+// immediate continuity (a reply about what was just said); anything older
+// is retrieved on demand through history_search. Measured minimum, not an
+// intent guess: the current message alone cannot carry a reference to the
+// previous reply, and two exchanges already double the window.
+export function lastTurnHistory(history: RuntimeContext['history']) {
+  let users = 0;
+  for (let index = history.length - 1; index >= 0; index--) {
+    if (history[index].role !== 'user') continue;
+    if (++users === 2) return history.slice(index);
+  }
+  return history;
+}
+
 export function compactHistory(history: RuntimeContext['history']) {
   let start = history.length;
   let characters = 0;
@@ -253,12 +268,9 @@ function memoryForPrompt(brief: MemoryBrief, budget: number) {
   return result;
 }
 
-function taskLedger(tasks: NonNullable<RuntimeContext['tasks']>, locatorOnly = false) {
+function taskLedger(tasks: NonNullable<RuntimeContext['tasks']>) {
   const week = Date.now() - 7 * 86_400_000;
   const open = tasks.filter((task) => !task.closedAt);
-  // Retrieval-first turns carry only an open-work locator (id/title/status);
-  // full briefs, progress and results load on demand through the task list.
-  if (locatorOnly) return open.map((task) => ({ id: task.id, title: task.title, status: task.status }));
   return [
     ...open,
     ...tasks.filter((task) => task.closedAt && Date.parse(task.closedAt) >= week).slice(0, 10),
@@ -298,7 +310,10 @@ function requestParts(
   const data = {
     mode,
     task: context.taskContext ?? null,
-    taskLedger: taskLedger(context.tasks ?? [], context.retrievalFirst === true),
+    // Retrieval-first turns send no task data at all: the notInjected
+    // navigation line names the task list, and the task tool's list action
+    // reads open work on demand (owner's two-navigation-lines design).
+    taskLedger: context.retrievalFirst === true ? [] : taskLedger(context.tasks ?? []),
     channel: context.channel || 'web',
     ...(context.speech ? { speech: context.speech } : {}),
     notificationRule: context.notificationRule ?? null,
