@@ -59,6 +59,13 @@ test('the catalog ranks by query, caps at five and hides direct tools', () => {
     ['memory_read', 'memory_search', 'memory_write'],
   );
   assert.ok(!result.tools.some((entry) => entry.name === 'send_message'));
+  // Definitions stay local: discovery never returns a schema, only names.
+  assert.ok(result.tools.every((entry) => !('parameters' in entry)));
+  assert.ok(
+    result.tools.every((entry) =>
+      (entry as { arguments?: string[] }).arguments?.every((arg) => !arg.includes(':')),
+    ),
+  );
   const capped = zeroToolCatalog(
     Array.from({ length: 12 }, (_, index) => tool(`deferred_${index}`, 'deferred', 'shared word')),
     'shared',

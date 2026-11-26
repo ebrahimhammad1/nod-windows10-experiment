@@ -517,10 +517,19 @@ export function zeroToolCatalog(tools: ToolDefinition[], query: string) {
   const ranked = tools
     .filter((tool) => tool.exposure === 'deferred')
     .map((tool) => {
+      // Names + short purposes + argument NAMES only: full schemas (types,
+      // constraints, descriptions) stay local. A call with wrong arguments
+      // gets a compact validation error to correct against, so definitions
+      // never ride any request.
+      const parameters = tool.parameters as
+        | { properties?: Record<string, unknown>; required?: string[] }
+        | undefined;
       const entry = {
         name: tool.name,
         description: (tool.description ?? '').slice(0, 160),
-        parameters: tool.parameters,
+        arguments: Object.keys(parameters?.properties ?? {}).map((key) =>
+          parameters?.required?.includes(key) ? key : `${key}?`,
+        ),
       };
       const haystack = `${tool.name} ${tool.description ?? ''}`.toLowerCase();
       const score = words.length ? words.filter((word) => haystack.includes(word)).length : 1;
@@ -1295,7 +1304,7 @@ export function createPiAgent(options: {
       if (deferred) guidelines.push('Use nod_tool_search to load deferred tools.');
       if (zeroLoadout)
         guidelines.push(
-          'No tools are declared in this chat. To use one, make your ENTIRE reply exactly one JSON object and nothing else: {"tool":"NAME","input":{...}}. Discover names and input shapes first with {"tool":"nod_tool_search","input":{"query":"what you need"}}. Tool results arrive as user messages; then answer normally or send another command.',
+          'No tools are declared in this chat. To use one, make your ENTIRE reply exactly one JSON object and nothing else: {"tool":"NAME","input":{...}}. Discover tool names and purposes with {"tool":"nod_tool_search","input":{"query":"what you need"}} - it returns no schemas. If a call fails, the error says which argument to fix: correct it and send the command again. Never claim you saved, changed or did something without an actual tool command and its result. Tool results arrive as user messages; then answer normally or send another command.',
         );
       const systemPrompt = guidelines.length
         ? `${input.systemPrompt}\n\nTool guidelines:\n${guidelines.map((rule) => `- ${rule}`).join('\n')}`
@@ -1766,6 +1775,8 @@ export function createPiAgent(options: {
                       ? contentText(lastContent as never).trim()
                       : '';
                   const command = zeroToolCommand(reply);
+                  if (process.env.NOD_BENCH_DEBUG)
+                    console.error('zero-loop reply:', reply.slice(0, 200));
                   if (!command) break;
                   let result: unknown;
                   try {
@@ -1787,6 +1798,8 @@ export function createPiAgent(options: {
                     typeof resultContent === 'string' || Array.isArray(resultContent)
                       ? contentText(resultContent as never)
                       : (JSON.stringify(result) ?? 'null');
+                  if (process.env.NOD_BENCH_DEBUG)
+                    console.error('zero-loop result:', serialized.slice(0, 200));
                   // Bounded like any tool result: an unbounded echo would
                   // re-inflate the very next request past the limit.
                   await session.prompt(

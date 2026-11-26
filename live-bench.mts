@@ -2,7 +2,7 @@
 // Key is read from the vault-copied file at runtime (GROQ_KEY_FILE); it is
 // never printed or logged. Requests are spaced past the 60s ITPM window so
 // per-minute quota does not contaminate per-request acceptance/timing.
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -79,11 +79,39 @@ async function run(mode: 'CURRENT' | 'MINIMAL' | 'ZERO', promptText: string) {
     instructions: 'Fixture workspace only.',
     exec: async () => ({ exitCode: 0, stdout: 'ok', stderr: '' }),
   };
+  // Real harmless local operation: 'memory' is backed by a real JSON file in
+  // the temp session root (validated action field, observable verified state
+  // after the turn). Every other tool keeps the fixture body, as before.
+  const memoryFile = join(sessionRoot, 'memory-store.json');
+  const memoryActions = ['memory_find', 'memory_read', 'memory_learn', 'memory_control', 'memory_forget'];
   const tools = Object.values(toolDefinitions as Record<string, any>).map((def: any) => ({
     name: def.name, description: def.description, parameters: def.parameters,
     ...(def.eager ? { eager: true } : {}),
     ...(def.companions?.length ? { companions: def.companions } : {}),
-    execute: async () => ({ content: [{ type: 'text' as const, text: `${def.name} fixture result` }] }),
+    execute: async (args: any, _opts: any) => {
+      if (def.name !== 'memory')
+        return { content: [{ type: 'text' as const, text: `${def.name} fixture result` }] };
+      const action = args?.action;
+      if (!memoryActions.includes(action))
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Error: memory needs a valid "action" (${memoryActions.join(', ')}); got ${JSON.stringify(action ?? null)}. memory_learn takes {messages?}.`,
+          }],
+        };
+      const store = JSON.parse(await readFile(memoryFile, 'utf8').catch(() => '{"notes":[]}'));
+      if (action === 'memory_learn') {
+        store.notes.push({ at: new Date().toISOString(), args });
+        await writeFile(memoryFile, JSON.stringify(store));
+        return { content: [{ type: 'text' as const, text: 'Saved to memory.' }] };
+      }
+      if (action === 'memory_find') {
+        const q = String(args?.query ?? '').toLowerCase();
+        const hits = store.notes.filter((n: any) => JSON.stringify(n).toLowerCase().includes(q));
+        return { content: [{ type: 'text' as const, text: JSON.stringify(hits).slice(0, 1000) }] };
+      }
+      return { content: [{ type: 'text' as const, text: 'ok' }] };
+    },
   }));
   const agent = createPiAgent({
     provider: 'compatible',
@@ -130,6 +158,13 @@ async function run(mode: 'CURRENT' | 'MINIMAL' | 'ZERO', promptText: string) {
       );
     await session.prompt(promptText, []);
     await session.dispose();
+    // Observable verified state: the local memory store after the turn.
+    try {
+      const stored = JSON.parse(await readFile(memoryFile, 'utf8'));
+      console.log(JSON.stringify({ memoryNotes: stored.notes.length, mentionsMilo: JSON.stringify(stored).includes('Milo') }));
+    } catch {
+      console.log(JSON.stringify({ memoryNotes: 0, mentionsMilo: false }));
+    }
   } catch (e) {
     outcome = `threw: ${String((e as any)?.stack ?? e).slice(0, 900)}`;
   }
