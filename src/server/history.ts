@@ -150,12 +150,21 @@ export function createHistorySearch({
       values,
     );
     let page = await pool.query<HistoryMessage & { place: string; total: number }>(
-      `${terms}, corpus AS (
+      // docs filters on the table column directly so the GIN index on
+      // to_tsvector('simple',text) can serve the match; only matching rows get
+      // their tsvector computed. corpus_count keeps the idf denominator over
+      // the whole scoped thread (identical ranking to counting the old corpus
+      // CTE) without a per-row tsvector over every message.
+      `${terms},
+       docs AS (
          SELECT m.id,m.owner_id,m.turn_id,m.role,m.text,m.created_at,to_tsvector('simple',m.text) AS v
-         FROM messages m CROSS JOIN terms WHERE ${scope('m')} AND m.hidden_at IS NULL),
-       docs AS (SELECT corpus.* FROM corpus CROSS JOIN terms WHERE ($2::text IS NULL OR corpus.v @@ terms.q)${kept('corpus')}),
+         FROM messages m CROSS JOIN terms
+         WHERE ${scope('m')} AND m.hidden_at IS NULL${kept('m')}
+           AND ($2::text IS NULL OR to_tsvector('simple',m.text) @@ terms.q)),
+       corpus_count AS (
+         SELECT count(*) AS n FROM messages m CROSS JOIN terms WHERE ${scope('m')} AND m.hidden_at IS NULL),
        weights AS (
-         SELECT w,ln(1+((SELECT count(*) FROM corpus)-count(*)+0.5)/(count(*)+0.5)) AS idf
+         SELECT w,ln(1+((SELECT n FROM corpus_count)-count(*)+0.5)/(count(*)+0.5)) AS idf
          FROM (SELECT DISTINCT lexeme AS w FROM unnest(tsvector_to_array(to_tsvector('simple',coalesce($2,'')))) lexeme) words
          JOIN docs ON docs.v @@ quote_literal(w)::tsquery GROUP BY w),
        scores AS (
