@@ -14,6 +14,7 @@ import {
   contentText,
   getCurrentTools,
   type AssistantMessage,
+  type Context,
   type ToolResultMessage,
 } from '@earendil-works/pi-ai';
 import { Agent as Connections, Dispatcher1Wrapper, buildConnector } from 'undici';
@@ -35,7 +36,10 @@ import {
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import { createPiModelRuntime } from './models.ts';
-import { resolveSelectionEffort } from '../../shared/model-defaults.ts';
+import {
+  promptStructuralComplexity,
+  resolveSelectionEffort,
+} from '../../shared/model-defaults.ts';
 import { createTurnFallback, modelKey } from './fallback.ts';
 import {
   estimateRequestTokens,
@@ -483,6 +487,24 @@ function planBilled(event: AgentEvent): AgentEvent {
  * ```json fence is tolerated). Anything else is a normal reply, not a
  * command - strict on purpose, so prose is never mistaken for a tool call.
  */
+// Text of the latest user message in a request context, for the Auto
+// structural-complexity signal (promptStructuralComplexity).
+export function lastUserText(context: Context): string {
+  for (let index = context.messages.length - 1; index >= 0; index--) {
+    const message = context.messages[index]!;
+    if (message.role !== 'user') continue;
+    const content = (message as { content?: unknown }).content;
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content))
+      return content
+        .filter((part) => part?.type === 'text')
+        .map((part) => part.text)
+        .join('\n');
+    return '';
+  }
+  return '';
+}
+
 export function zeroToolCommand(
   reply: string,
 ): { tool: string; input?: Record<string, unknown> } | undefined {
@@ -1416,6 +1438,7 @@ export function createPiAgent(options: {
           session.setThinkingLevel(
             resolveSelectionEffort(access.provider, access.definition.choice, 'auto', {
               estimatedInputTokens: estimatedRequestTokens(quotaKey, context),
+              structuralComplexity: promptStructuralComplexity(lastUserText(context)),
               inputQuotaPerMinute: knownRequestQuota(quotaKey)?.limit,
               outputQuotaPerMinute: knownOutputQuota(quotaKey)?.limit,
             }),

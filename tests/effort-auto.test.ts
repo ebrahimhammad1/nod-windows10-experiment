@@ -8,7 +8,8 @@
  *   3. a tight learned quota keeps the lightest level (measured free tier:
  *      7,000 input / 1,000 output tokens per minute - reasoning would burn
  *      the scarce output window);
- *   4. a simple turn (estimate <= 2,048) keeps the lightest level;
+ *   4. a simple turn (estimate <= 2,048 AND no structural complexity
+ *      markers in the prompt) keeps the lightest level;
  *   5. a priced model keeps the lightest level unless the task is
  *      substantial (>= 8,192) - cost guard;
  *   6. otherwise the provider default - Auto NEVER exceeds it;
@@ -23,6 +24,7 @@ import {
   AUTO_SUBSTANTIAL_TASK_TOKENS,
   AUTO_TIGHT_INPUT_QUOTA,
   AUTO_TIGHT_OUTPUT_QUOTA,
+  promptStructuralComplexity,
   resolveSelectionEffort,
 } from '../src/shared/model-defaults.ts';
 import type { ModelChoice } from '../src/shared/models.ts';
@@ -83,6 +85,65 @@ test('a simple turn keeps the lightest level, even on a free model', () => {
       estimatedInputTokens: AUTO_SIMPLE_TASK_TOKENS + 1,
     }),
     'high',
+  );
+});
+
+test('structural complexity keeps a small-but-hard prompt off the lightest level', () => {
+  const model = choice({ pricing: free });
+  // Small payload alone would be 'simple' (rule 4); structural markers say
+  // the task is not simple, so it resolves to the provider default.
+  assert.equal(
+    resolveSelectionEffort('groq', model, 'auto', {
+      estimatedInputTokens: 100,
+      structuralComplexity: true,
+    }),
+    'high',
+  );
+  // Without markers the same small turn stays light.
+  assert.equal(
+    resolveSelectionEffort('groq', model, 'auto', {
+      estimatedInputTokens: 100,
+      structuralComplexity: false,
+    }),
+    'low',
+  );
+  // The cost guard still wins on a priced model: complexity never raises
+  // spend past the guard, and Auto never exceeds the provider default.
+  assert.equal(
+    resolveSelectionEffort('groq', choice({ pricing: priced }), 'auto', {
+      estimatedInputTokens: 100,
+      structuralComplexity: true,
+    }),
+    'low',
+  );
+  // A tight quota still pins the lightest level even with markers.
+  assert.equal(
+    resolveSelectionEffort('groq', model, 'auto', {
+      estimatedInputTokens: 100,
+      structuralComplexity: true,
+      inputQuotaPerMinute: AUTO_TIGHT_INPUT_QUOTA,
+    }),
+    'low',
+  );
+});
+
+test('promptStructuralComplexity reads language-neutral structure, not size', () => {
+  assert.equal(promptStructuralComplexity('hi'), false);
+  assert.equal(promptStructuralComplexity('what time is it?'), false);
+  assert.equal(promptStructuralComplexity('a'.repeat(5000)), false, 'size alone is not complexity');
+  assert.equal(promptStructuralComplexity('fix this:\n```\nconst x =\n```'), true, 'code fence');
+  assert.equal(
+    promptStructuralComplexity('1. first\n2. second\n3. third'),
+    true,
+    'numbered list',
+  );
+  assert.equal(promptStructuralComplexity('- one\n- two\n- three'), true, 'bullet list');
+  assert.equal(promptStructuralComplexity('why this? and why that?'), true, 'two questions');
+  assert.equal(promptStructuralComplexity('لماذا هذا؟ ولماذا ذاك؟'), true, 'Arabic question marks');
+  assert.equal(
+    promptStructuralComplexity('line one\nline two\nline three\nline four'),
+    true,
+    'multi-paragraph request',
   );
 });
 

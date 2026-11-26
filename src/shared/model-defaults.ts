@@ -76,13 +76,33 @@ export function defaultEffort(provider: ModelProvider, model: ModelChoice): Mode
 
 /**
  * Signals the request-time layer can see when resolving Auto: the estimated
- * size of THIS turn's payload (task complexity, no LLM classification call)
- * and the connection's learned per-minute quotas (headroom).
+ * size of THIS turn's payload, STRUCTURAL complexity markers of the prompt
+ * (task complexity, no LLM classification call) and the connection's
+ * learned per-minute quotas (headroom).
  */
 export interface EffortSignal {
   estimatedInputTokens?: number;
+  structuralComplexity?: boolean;
   inputQuotaPerMinute?: number;
   outputQuotaPerMinute?: number;
+}
+
+/**
+ * Language-neutral STRUCTURAL task-complexity markers in the prompt text
+ * (no keywords, no model call): a code fence, a multi-item list, several
+ * questions (Latin and Arabic marks), or a multi-paragraph request. Size
+ * alone says nothing about difficulty - a one-line regex puzzle is harder
+ * than a long pasted log - so these markers keep a small-but-complex
+ * prompt from being classed as a simple turn.
+ */
+export function promptStructuralComplexity(text: string): boolean {
+  if (text.includes('```')) return true;
+  const lines = text.split('\n').filter((line) => line.trim());
+  if (lines.length >= 4) return true;
+  const listItems = lines.filter((line) => /^\s*(?:[-*•]|\d+[.)])\s/.test(line)).length;
+  if (listItems >= 3) return true;
+  const questions = (text.match(/[?؟]/g) ?? []).length;
+  return questions >= 2;
 }
 
 // A turn at or below this estimate is simple (a greeting, a short question)
@@ -105,7 +125,8 @@ export const AUTO_TIGHT_OUTPUT_QUOTA = 1000;
  *   1. a model with a single effort level resolves to it;
  *   2. a tight learned quota keeps the lightest level (reasoning would burn
  *      the scarce per-minute output window - measured on the free tier);
- *   3. a simple turn (small estimated payload) keeps the lightest level;
+ *   3. a simple turn (small estimated payload AND no structural
+ *      complexity markers in the prompt) keeps the lightest level;
  *   4. a priced model keeps the lightest level unless the task is
  *      substantial (cost guard);
  *   5. otherwise the provider default.
@@ -133,7 +154,8 @@ export function resolveSelectionEffort(
   if (tightInput || tightOutput) return lightest;
   if (
     signal.estimatedInputTokens !== undefined &&
-    signal.estimatedInputTokens <= AUTO_SIMPLE_TASK_TOKENS
+    signal.estimatedInputTokens <= AUTO_SIMPLE_TASK_TOKENS &&
+    !signal.structuralComplexity
   )
     return lightest;
   const pricing = model.pricing;
