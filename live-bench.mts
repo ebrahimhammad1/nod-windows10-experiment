@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { createPiAgent } from './src/providers/pi/index.ts';
 import { toolDefinitions } from './src/runtime/tools.ts';
 import { systemPrompt } from './src/runtime/prompt.ts';
+import { learnRequestQuota } from './src/providers/pi/request-quota.ts';
 
 const key = (await readFile(process.env.GROQ_KEY_FILE!, 'utf8')).trim();
 const BASE = 'https://api.groq.com/openai/v1';
@@ -108,6 +109,14 @@ async function run(mode: 'CURRENT' | 'MINIMAL', promptText: string) {
       runTool: async (_n: string, _p: unknown, run: any) => run(),
       onEvent: () => {}, shouldStop: () => false,
     } as any);
+    // NOD_BENCH_LEARN=7000 seeds the quota a long-lived app would already
+    // have learned from an earlier rejection, so a fresh bench process
+    // exercises the quota-aware paths instead of re-paying the first 413.
+    if (process.env.NOD_BENCH_LEARN)
+      learnRequestQuota(
+        `compatible/api_key/${MODEL}`,
+        `Request too large for model \`${MODEL}\` on input tokens per minute (ITPM): Limit ${process.env.NOD_BENCH_LEARN}, Requested 99999. Please reduce your message size.`,
+      );
     await session.prompt(promptText, []);
     await session.dispose();
   } catch (e) {
