@@ -533,9 +533,13 @@ function earlierEnvelopes(pi: ExtensionAPI) {
         ? [index]
         : [],
     );
-    // Current message plus the last exchange stay verbatim.
+    // Current message plus the last exchange stay; the last exchange's owner
+    // envelope is reduced to the owner's bare words plus the time header,
+    // dropping the per-request wrapper (retrieval rules, frozen snapshot,
+    // request metadata, memory evidence) which only the current envelope needs.
+    const previous = envelopes.length >= 2 ? envelopes[envelopes.length - 2]! : -1;
     const prunable = envelopes.length > 2 ? envelopes.slice(0, -2) : [];
-    if (!prunable.length) return messages;
+    if (previous < 0) return messages;
     const collapsed = Math.max(prunable.length - keptStepMarkers, 0);
     const collapseAt = collapsed >= 1 ? prunable[0]! : -1;
     const dropped = new Set(collapsed >= 1 ? prunable.slice(0, collapsed) : []);
@@ -544,13 +548,33 @@ function earlierEnvelopes(pi: ExtensionAPI) {
     // replies and tool calls/results before the last exchange leave the
     // context too (originals stay searchable in the store). Only the last
     // exchange and the current message keep their assistant/tool messages.
-    const boundary = prunable.length ? envelopes[envelopes.length - 2]! : messages.length;
+    const boundary = previous;
     return messages.flatMap((message, index) => {
       if (
         index < boundary &&
         (message.role === 'assistant' || message.role === 'toolResult' || message.role === 'tool')
       )
         return [];
+      if (index === boundary) {
+        const text = contentText(
+          (message as unknown as { content: Parameters<typeof contentText>[0] }).content,
+        );
+        const cut = text.indexOf('Request data (JSON):');
+        const header = cut >= 0 ? text.slice(0, cut) : '';
+        const raw = text.match(envelopeInstruction)?.[1] ?? '';
+        let instruction = raw;
+        try {
+          instruction = JSON.parse(`"${raw}"`) as string;
+        } catch {
+          // keep the raw capture when it is not valid JSON string content
+        }
+        return [
+          {
+            ...message,
+            content: [{ type: 'text' as const, text: `${header}${instruction}` }],
+          },
+        ];
+      }
       if (index === collapseAt)
         return [
           {

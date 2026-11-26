@@ -10117,10 +10117,13 @@ test('completed owner envelopes collapse to step markers and the last exchange s
   // Their frozen snapshots leave the context with the envelope.
   assert.equal(latest.includes('frozen memory snapshot for first task'), false);
   assert.equal(latest.includes('frozen recent snapshot for second task'), false);
-  // The last exchange and the current message stay verbatim.
-  assert.ok(latest.includes('\\"currentInstruction\\":\\"third task\\"'));
+  // The last exchange's envelope is reduced to the owner's bare words plus
+  // the time header; the current message stays a full envelope.
+  assert.equal(latest.includes('\\"currentInstruction\\":\\"third task\\"'), false);
   assert.ok(latest.includes('\\"currentInstruction\\":\\"fourth task\\"'));
-  assert.ok(latest.includes('frozen memory snapshot for third task'));
+  assert.equal(latest.includes('frozen memory snapshot for third task'), false);
+  assert.ok(latest.includes('Current local time: 2026-11-26T14:00:00+02:00.'));
+  assert.ok(latest.includes('third task'));
   // Completed turns fold into their step line: old assistant replies leave
   // the context; the last exchange's reply stays.
   assert.equal(latest.includes('Conclusion 1.'), false);
@@ -10187,14 +10190,15 @@ test('step markers are bounded: the oldest collapse into one counting line', asy
   };
   for (let n = 1; n <= 9; n++) await turn(`task number ${n}`);
   const latest = requests[8]!.join('\n');
-  // 9 turns: last two envelopes verbatim, 5 individual markers, the 2 oldest
-  // collapsed into one counting line.
+  // 9 turns: current envelope full, previous envelope reduced to bare words,
+  // 5 individual markers, the 2 oldest collapsed into one counting line.
   assert.equal(latest.split('Earlier owner request (completed):').length - 1, 5);
   assert.ok(latest.includes('Earlier completed steps - saved; search to read them.'));
   assert.equal(latest.includes('task number 1'), false);
   assert.equal(latest.includes('task number 2'), false);
   assert.ok(latest.includes('task number 4'));
-  assert.ok(latest.includes('\\"currentInstruction\\":\\"task number 8\\"'));
+  assert.equal(latest.includes('\\"currentInstruction\\":\\"task number 8\\"'), false);
+  assert.ok(latest.includes('task number 8'));
   assert.ok(latest.includes('\\"currentInstruction\\":\\"task number 9\\"'));
   // The slope stopper: turn 8 and turn 9 carry the same marker count.
   const previous = requests[7]!.join('\n');
