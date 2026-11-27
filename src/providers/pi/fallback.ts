@@ -12,6 +12,18 @@ import {
 } from '@earendil-works/pi-ai';
 import { estimateTokens } from '@earendil-works/pi-coding-agent';
 import type { ModelAccess } from '../../ports/models.ts';
+import {
+  promptStructuralComplexity,
+  resolveSelectionEffort,
+} from '../../shared/model-defaults.ts';
+import {
+  estimatedRequestTokens,
+  knownOutputQuota,
+  knownRequestQuota,
+  lastUserText,
+  learnRequestQuota,
+  quotaPreflightError,
+} from './request-quota.ts';
 import type { createPiModelRuntime } from './models.ts';
 import { hasNativeAudio, readsNativeAudio } from './audio.ts';
 
@@ -98,13 +110,33 @@ export function createTurnFallback(options: {
     context: Context,
     streamOptions: SimpleStreamOptions | undefined,
   ) {
-    if (index === 0)
+    const candidate = candidates[index]!;
+    // Refuse locally only when this connection itself reported a per-minute
+    // input limit that even the estimated request exceeds; an unknown quota
+    // stays unknown and the request goes to the provider.
+    const refused = quotaPreflightError(modelKey(candidate.access), context);
+    if (refused) throw refused;
+    if (index === 0) {
+      // In a fallback chain the session-level Auto wiring is skipped, so a
+      // stored 'auto' on the PRIMARY resolves here, per request, against
+      // the primary's own model and learned quotas. Manual levels and the
+      // session's own stream options pass through exactly as before.
+      if (!options.primary.access.effortAuto)
+        return {
+          connection: options.primary.connection,
+          model: target,
+          upstream: options.primary.stream(target, context, streamOptions),
+        };
+      const level = autoLevel(options.primary.access, options.primary.connection.model, context);
       return {
         connection: options.primary.connection,
         model: target,
-        upstream: options.primary.stream(target, context, streamOptions),
+        upstream: options.primary.stream(target, context, {
+          ...streamOptions,
+          reasoning: level === 'off' ? undefined : level,
+        } as SimpleStreamOptions),
       };
-    const candidate = candidates[index]!;
+    }
     const { choice } = candidate.access.definition;
     if (!fits(choice, context))
       throw new Error(`${choice.name} can't take this conversation, so Nod didn't try it.`);
@@ -113,7 +145,12 @@ export function createTurnFallback(options: {
     ready.set(index, connection);
     if (options.automatic) await candidate.access.prepareRequest?.(connection.model.id, true);
     const { apiKey: _, headers: __, env: ___, ...rest } = streamOptions ?? {};
-    const level = clampThinkingLevel(connection.model, candidate.access.effort);
+    // Per-CANDIDATE resolution: a stored 'auto' adapts to THIS request
+    // against the backup's own capabilities and learned quotas, never the
+    // primary's resolved level; manual levels pass through untouched.
+    const level = candidate.access.effortAuto
+      ? autoLevel(candidate.access, connection.model, context)
+      : clampThinkingLevel(connection.model, candidate.access.effort);
     return {
       connection,
       model: connection.model,
@@ -122,6 +159,22 @@ export function createTurnFallback(options: {
         reasoning: level === 'off' ? undefined : level,
       } as SimpleStreamOptions),
     };
+  }
+
+  // Auto resolution for one candidate: the candidate's own provider, effort
+  // list, calibrated estimate and learned quotas - never another
+  // candidate's, and clamped to what the candidate's model actually maps.
+  function autoLevel(access: ModelAccess, model: Model<Api>, context: Context) {
+    const key = modelKey(access);
+    return clampThinkingLevel(
+      model,
+      resolveSelectionEffort(access.provider, access.definition.choice, 'auto', {
+        estimatedInputTokens: estimatedRequestTokens(key, context),
+        structuralComplexity: promptStructuralComplexity(lastUserText(context)),
+        inputQuotaPerMinute: knownRequestQuota(key)?.limit,
+        outputQuotaPerMinute: knownOutputQuota(key)?.limit,
+      }),
+    );
   }
 
   const movesOn = (message: AssistantMessage, index: number, connection: Connection) =>
@@ -153,6 +206,7 @@ export function createTurnFallback(options: {
             const held: AssistantMessageEvent[] = [];
             let failure: AssistantMessage | undefined;
             for await (const event of opened.upstream) {
+              if (event.type === 'error') learnRequestQuota(modelKey(access), event.error.errorMessage);
               if (!sent && event.type === 'start') {
                 held.push(event);
                 continue;
@@ -205,6 +259,7 @@ export function createTurnFallback(options: {
             }
             reason = error instanceof Error ? error.message : String(error);
           }
+          learnRequestQuota(modelKey(access), reason);
           tried.push(`${access.provider} / ${access.definition.choice.id}: ${reason}`);
           move(index + 1);
         }

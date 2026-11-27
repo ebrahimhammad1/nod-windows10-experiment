@@ -17,7 +17,16 @@ export interface ModelRecord {
   credential?: ModelCredential;
   requestFailures?: Record<
     string,
-    { credentialTag: string; reason: string; failures: number; retryAt: number }
+    {
+      credentialTag: string;
+      reason: string;
+      failures: number;
+      retryAt: number;
+      // 'connection' marks credential-wide failures (rejected key, missing
+      // credits) that break every model on the connection; undefined on
+      // records written before scoping, which behaved connection-wide.
+      scope?: 'connection' | 'model';
+    }
   >;
 }
 

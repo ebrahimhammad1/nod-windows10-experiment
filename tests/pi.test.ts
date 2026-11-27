@@ -275,8 +275,11 @@ test('models and routers complete tool discovery inside the endpoint context', a
         }
         if (!summarizing)
           assert.ok(
-            body.tools.some((tool: any) => tool.function.name === 'apps'),
-            'Connected apps are unreachable without the apps tool.',
+            body.tools.some(
+              (tool: any) =>
+                tool.function.name === 'apps' || tool.function.name === 'nod_tool_search',
+            ),
+            'Connected apps are unreachable without the apps tool or its discovery search.',
           );
         const call = summarizing ? undefined : calls[requests++];
         if (call) assert.ok(body.tools.some((tool: any) => tool.function.name === call[0]));
@@ -2442,7 +2445,14 @@ test('real Pi saves its user message and tool call before a side effect and reco
           timestamp: Date.now(),
           stopReason: tool ? 'toolUse' : 'stop',
           content: tool
-            ? [{ type: 'toolCall', id: 'effect-one', name: 'effect', arguments: {} }]
+            ? [
+                {
+                  type: 'toolCall',
+                  id: 'effect-one',
+                  name: 'nod_tool',
+                  arguments: { name: 'effect', args: {} },
+                },
+              ]
             : [{ type: 'text', text: 'Done' }],
           usage: {
             input: 1,
@@ -2580,6 +2590,139 @@ async function hostSandbox(t: test.TestContext) {
   return { prefix, root, bin, calls, tools, run, workspace };
 }
 
+test('a bounded tool error keeps its error flag and a retrievable pointer, and a stop still stops the turn', async (t) => {
+  const { prefix, root, workspace } = await hostSandbox(t);
+  const marker = `synthetic-error-${randomUUID()}`;
+  const huge = `${marker}-head ${'x'.repeat(200_000)} ${marker}-tail`;
+  const runTool = (_name: string, _params: unknown, run: () => Promise<{ content: [] }>) =>
+    run();
+  const openAgent = async (
+    f: Awaited<ReturnType<typeof fixture>>,
+    execute: () => Promise<never>,
+    turns: { count: number },
+    shouldStop: () => boolean = () => false,
+  ) => {
+    const sessionRoot = join(f.directory, 'sessions');
+    const agent = createPiAgent({
+      provider: 'openai',
+      apiKey: 'fixture',
+      sessionRoot,
+      createSession: async (options) => {
+        const result = await createAgentSession(options);
+        result.session.setActiveToolsByName(result.session.getAllTools().map((tool) => tool.name));
+        result.session.agent.streamFunction = (model) => {
+          const tool = turns.count++ === 0;
+          const message: AssistantMessage = {
+            role: 'assistant',
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            timestamp: Date.now(),
+            stopReason: tool ? 'toolUse' : 'stop',
+            content: tool
+              ? [
+                  {
+                    type: 'toolCall',
+                    id: 'fail-one',
+                    name: 'nod_tool',
+                    arguments: { name: 'effect', args: {} },
+                  },
+                ]
+              : [{ type: 'text', text: 'Done' }],
+            usage: {
+              input: 1,
+              output: 1,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 2,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+          };
+          const stream = createAssistantMessageEventStream();
+          stream.push({ type: 'start', partial: message });
+          stream.push({ type: 'done', reason: tool ? 'toolUse' : 'stop', message });
+          return stream;
+        };
+        return result;
+      },
+    });
+    const session = await agent.open({
+      ...fakeExecution(f.threadId, randomUUID()),
+      systemPrompt: 'fixture',
+      workspace,
+      runTool,
+      shouldStop,
+      onEvent() {},
+      tools: [
+        {
+          name: 'effect',
+          description: 'fixture',
+          parameters: { type: 'object', properties: {} },
+          execute,
+        },
+      ],
+    });
+    return { agent, session, sessionRoot };
+  };
+
+  // A huge tool error is bounded into an error result that keeps the error
+  // flag and points at the saved full text: nothing is dropped without a
+  // retrievable pointer.
+  const f = await fixture();
+  const failedTurns = { count: 0 };
+  const failing = await openAgent(f, async () => {
+    throw new Error(huge);
+  }, failedTurns);
+  try {
+    await failing.session.prompt('synthetic user request', []);
+    assert.equal(failedTurns.count, 2);
+    const entries = await readPiSessionEntries({
+      threadId: f.threadId,
+      sessionRoot: failing.sessionRoot,
+    });
+    const results = entries.filter(
+      (entry) => entry.type === 'message' && entry.message.role === 'toolResult',
+    );
+    assert.equal(results.length, 1);
+    const result = (
+      results[0] as {
+        message: { isError?: boolean; content: Array<{ type: string; text?: string }> };
+      }
+    ).message;
+    assert.equal(result.isError, true);
+    const shown = result.content.map((part) => part.text ?? '').join('');
+    const file = shown.match(/"workspaceFile":"([^"]+)"/)![1];
+    assert.ok(file.startsWith('.nod/outputs/'));
+    const saved = await readFile(join(workspace.path, file).replace(prefix, root), 'utf8');
+    assert.ok(saved.includes(`${marker}-head`));
+    assert.ok(saved.includes(`${marker}-tail`));
+    assert.ok(saved.length >= huge.length);
+  } finally {
+    await failing.agent.dispose();
+    await f.close();
+  }
+
+  // A stop during the side effect is not an error result either: the stop
+  // propagates and the turn ends instead of continuing to another model call.
+  const f2 = await fixture();
+  const stoppedTurns = { count: 0 };
+  const stopping = await openAgent(
+    f2,
+    async () => {
+      throw new Error(huge);
+    },
+    stoppedTurns,
+    () => true,
+  );
+  try {
+    await stopping.session.prompt('synthetic user request', []).catch(() => {});
+    assert.equal(stoppedTurns.count, 1);
+  } finally {
+    await stopping.agent.dispose();
+    await f2.close();
+  }
+});
+
 test('native Pi tools run only through workspace exec on sandbox paths that do not exist on the host', async (t) => {
   const { prefix, calls, run } = await hostSandbox(t);
   assert.equal(existsSync(prefix), false);
@@ -2690,7 +2833,14 @@ test('the owner command stream records exit status and output without known secr
               timestamp: Date.now(),
               stopReason: call ? 'toolUse' : 'stop',
               content: call
-                ? [{ type: 'toolCall', id: `bash-${step}`, name: 'bash', arguments: call }]
+                ? [
+                    {
+                      type: 'toolCall',
+                      id: `bash-${step}`,
+                      name: 'nod_tool',
+                      arguments: { name: 'bash', args: call },
+                    },
+                  ]
                 : [{ type: 'text', text: 'Done' }],
               usage: {
                 input: 1,
@@ -9799,7 +9949,9 @@ test('each session opens on its work model and the observer starts fresh after a
         provider: 'openai',
         method: 'api_key',
         definition: catalog.find((item) => item.choice.id === (choice?.modelId ?? 'gpt-6.1-sol'))!,
-        effort: choice?.effort ?? 'high',
+        // ModelAccess carries a concrete level; the stored 'auto' mode would
+        // be resolved by the request layer, so the fixture maps it.
+        effort: choice?.effort && choice.effort !== 'auto' ? choice.effort : 'high',
         read: async () => ({ type: 'api_key', key: 'fixture-openai-key' }),
       };
     },
@@ -10016,11 +10168,307 @@ test('a new request after the cache went cold leaves large earlier tool results 
   assert.ok(followUp.includes('What did the first source say?'));
   assert.ok(text(requests[4]!).includes('LARGE-RESULT-2'));
   assert.deepEqual(requests[4]!.slice(0, requests[3]!.length), requests[3]);
-  for (const later of [5, 7, 8]) {
-    assert.ok(text(requests[later]!).includes('LARGE-RESULT-2'));
-    assert.deepEqual(requests[later]!.slice(0, requests[later - 1]!.length), requests[later - 1]);
+  // Every new owner request ages the previous turns' oversize results out
+  // of the replayed transcript, not only cold-cache restarts; the rewrite is
+  // monotonic, so after the first aged note later requests keep a
+  // byte-identical prefix.
+  for (const later of [5, 6, 7, 8]) {
+    const body = text(requests[later]!);
+    assert.equal(body.includes('LARGE-RESULT-2'), false);
+    assert.match(
+      body,
+      /This read_large result \(5,015 characters\) came from an earlier request and is no longer in context\./,
+    );
   }
+  for (const later of [6, 7, 8])
+    assert.deepEqual(requests[later]!.slice(0, requests[later - 1]!.length), requests[later - 1]);
   assert.ok((await localText(join(directory, threadId))).includes('LARGE-RESULT-1'));
+});
+
+test('completed owner envelopes collapse to step markers and the last exchange stays verbatim', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-earlier-envelopes-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const requests: string[][] = [];
+  const script: string[] = [];
+  const agent = createPiAgent({
+    provider: 'openai',
+    apiKey: 'fixture-key',
+    sessionRoot: directory,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      result.session.setActiveToolsByName(result.session.getAllTools().map((tool) => tool.name));
+      result.session.agent.streamFunction = (model, context) => {
+        requests.push(context.messages.map((message) => JSON.stringify(message)));
+        const step = script.shift() ?? 'answer';
+        const message: AssistantMessage = {
+          ...fauxAssistantMessage([{ type: 'text', text: `Conclusion ${requests.length}.` }]),
+          provider: model.provider,
+          model: model.id,
+          api: model.api,
+          stopReason: 'stop',
+          timestamp: Date.now(),
+        };
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: 'done', reason: 'stop', message });
+        return stream;
+      };
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const threadId = randomUUID();
+  const envelope = (instruction: string) =>
+    `Current local time: 2026-11-26T14:00:00+02:00. User time zone: Africa/Cairo.\nRequest data (JSON):\n${JSON.stringify(
+      {
+        mode: 'conversation',
+        task: null,
+        taskLedger: [],
+        channel: 'web',
+        memoryForThisRequest: `<frozen memory snapshot for ${instruction}>`,
+        recentConversation: [{ role: 'user', text: `frozen recent snapshot for ${instruction}` }],
+        currentInstruction: instruction,
+      },
+    )}`;
+  const turn = async (instruction: string) => {
+    script.push('answer');
+    const session = await agent.open({
+      ...fakeExecution(threadId, randomUUID()),
+      newRequest: true,
+      systemPrompt: 'Fixture system',
+      ...sandbox,
+      tools: [],
+      shouldStop: () => false,
+      onEvent() {},
+    });
+    await session.prompt(envelope(instruction), []);
+    await session.dispose();
+    await setTimeout(2);
+  };
+  await turn('first task');
+  await turn('second task');
+  await turn('third task');
+  await turn('fourth task');
+  const latest = requests[3]!.join('\n');
+  // Completed turns collapse to one-line step markers with a retrieval pointer.
+  assert.equal(latest.split('Earlier owner request (completed):').length - 1, 2);
+  assert.match(latest, /Earlier owner request \(completed\): \\"first task\\"/);
+  assert.match(latest, /Earlier owner request \(completed\): \\"second task\\"/);
+  assert.ok(latest.includes('history_search'));
+  // Their frozen snapshots leave the context with the envelope.
+  assert.equal(latest.includes('frozen memory snapshot for first task'), false);
+  assert.equal(latest.includes('frozen recent snapshot for second task'), false);
+  // The last exchange's envelope is reduced to the owner's bare words plus
+  // the time header; the current message stays a full envelope.
+  assert.equal(latest.includes('\\"currentInstruction\\":\\"third task\\"'), false);
+  assert.ok(latest.includes('\\"currentInstruction\\":\\"fourth task\\"'));
+  assert.equal(latest.includes('frozen memory snapshot for third task'), false);
+  assert.ok(latest.includes('Current local time: 2026-11-26T14:00:00+02:00.'));
+  assert.ok(latest.includes('third task'));
+  // Completed turns fold into their step line: old assistant replies leave
+  // the context; the last exchange's reply stays.
+  assert.equal(latest.includes('Conclusion 1.'), false);
+  assert.equal(latest.includes('Conclusion 2.'), false);
+  assert.ok(latest.includes('Conclusion 3.'));
+  // Originals stay in the session store: pointer retrieval reads them whole.
+  const stored = await localText(join(directory, threadId));
+  assert.ok(stored.includes('frozen memory snapshot for first task'));
+});
+
+test('step markers are bounded: the oldest collapse into one counting line', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-bounded-markers-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const requests: string[][] = [];
+  const script: string[] = [];
+  const agent = createPiAgent({
+    provider: 'openai',
+    apiKey: 'fixture-key',
+    sessionRoot: directory,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      result.session.setActiveToolsByName(result.session.getAllTools().map((tool) => tool.name));
+      result.session.agent.streamFunction = (model, context) => {
+        requests.push(context.messages.map((message) => JSON.stringify(message)));
+        script.shift();
+        const message: AssistantMessage = {
+          ...fauxAssistantMessage([{ type: 'text', text: `Conclusion ${requests.length}.` }]),
+          provider: model.provider,
+          model: model.id,
+          api: model.api,
+          stopReason: 'stop',
+          timestamp: Date.now(),
+        };
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: 'done', reason: 'stop', message });
+        return stream;
+      };
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const threadId = randomUUID();
+  const envelope = (instruction: string) =>
+    `Current local time: 2026-11-26T14:00:00+02:00.\nRequest data (JSON):\n${JSON.stringify({
+      mode: 'conversation',
+      memoryForThisRequest: `<frozen memory snapshot for ${instruction}>`,
+      recentConversation: [{ role: 'user', text: `frozen recent snapshot for ${instruction}` }],
+      currentInstruction: instruction,
+    })}`;
+  const turn = async (instruction: string) => {
+    script.push('answer');
+    const session = await agent.open({
+      ...fakeExecution(threadId, randomUUID()),
+      newRequest: true,
+      systemPrompt: 'Fixture system',
+      ...sandbox,
+      tools: [],
+      shouldStop: () => false,
+      onEvent() {},
+    });
+    await session.prompt(envelope(instruction), []);
+    await session.dispose();
+    await setTimeout(2);
+  };
+  for (let n = 1; n <= 9; n++) await turn(`task number ${n}`);
+  const latest = requests[8]!.join('\n');
+  // 9 turns: current envelope full, previous envelope reduced to bare words,
+  // 5 individual markers, the 2 oldest collapsed into one counting line.
+  assert.equal(latest.split('Earlier owner request (completed):').length - 1, 5);
+  assert.ok(latest.includes('Earlier completed steps - saved; search to read them.'));
+  assert.equal(latest.includes('task number 1'), false);
+  assert.equal(latest.includes('task number 2'), false);
+  assert.ok(latest.includes('task number 4'));
+  assert.equal(latest.includes('\\"currentInstruction\\":\\"task number 8\\"'), false);
+  assert.ok(latest.includes('task number 8'));
+  assert.ok(latest.includes('\\"currentInstruction\\":\\"task number 9\\"'));
+  // The slope stopper: turn 8 and turn 9 carry the same marker count.
+  const previous = requests[7]!.join('\n');
+  assert.equal(previous.split('Earlier owner request (completed):').length - 1, 5);
+  assert.ok(previous.includes('Earlier completed steps - saved; search to read them.'));
+  // No count in the collapse line: the marker region stays byte-stable.
+  assert.equal(/\d+ earlier completed steps/.test(latest), false);
+});
+
+test('a spilled tool output points at its file and the optional script path', async () => {
+  const { createContextOutput } = await import('../src/providers/pi/context-output.ts');
+  const output = createContextOutput(
+    fakeWorkspace().open({ threadId: 'fixture', workspacePath: '/fixture/workspace', signal: new AbortController().signal }),
+    () => false,
+  );
+  const long = `LONG-OUTPUT ${'x'.repeat(5000)}`;
+  const spilled = JSON.parse(
+    await output.save([{ type: 'text' as const, text: long }], 1000),
+  );
+  assert.equal(spilled.characters, long.length);
+  assert.ok(spilled.workspaceFile.endsWith('.txt'));
+  assert.ok(spilled.preview.length < 1000);
+  assert.ok(spilled.tail.length > 0);
+  assert.ok(spilled.process.includes('small script over the saved file'));
+  assert.ok(spilled.process.includes('sandbox tools'));
+  // An output that fits its preview is returned whole, with no script nudge.
+  const fits = JSON.parse(await output.save([{ type: 'text' as const, text: 'short' }], 1000));
+  assert.equal(fits.preview, 'short');
+  assert.equal(fits.process, undefined);
+});
+
+test('repeated identical reads collapse to a pointer at the first copy', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-duplicate-results-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const requests: string[][] = [];
+  const script: string[] = [];
+  const contents: string[] = [];
+  const agent = createPiAgent({
+    provider: 'openai',
+    apiKey: 'fixture-key',
+    sessionRoot: directory,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      result.session.setActiveToolsByName(result.session.getAllTools().map((tool) => tool.name));
+      result.session.agent.streamFunction = (model, context) => {
+        requests.push(context.messages.map((message) => JSON.stringify(message)));
+        const step = script.shift() ?? 'answer';
+        const message: AssistantMessage = {
+          ...fauxAssistantMessage(
+            step === 'answer'
+              ? [{ type: 'text', text: `Conclusion ${requests.length}.` }]
+              : [{ type: 'toolCall', id: randomUUID(), name: step, arguments: {} }],
+          ),
+          provider: model.provider,
+          model: model.id,
+          api: model.api,
+          stopReason: step === 'answer' ? 'stop' : 'toolUse',
+          timestamp: Date.now(),
+        };
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: 'done', reason: message.stopReason as 'stop', message });
+        return stream;
+      };
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const threadId = randomUUID();
+  const turn = async (prompt: string, steps: string[], newRequest = true) => {
+    script.push(...steps);
+    const session = await agent.open({
+      ...fakeExecution(threadId, randomUUID()),
+      newRequest,
+      systemPrompt: 'Fixture system',
+      ...sandbox,
+      tools: [
+        {
+          name: 'read_report',
+          description: 'Read a synthetic report.',
+          parameters: { type: 'object', properties: {} },
+          eager: true,
+          execute: async () => ({ content: [{ type: 'text', text: contents.shift()! }] }),
+        },
+        {
+          name: 'read_note',
+          description: 'Read a small synthetic note.',
+          parameters: { type: 'object', properties: {} },
+          eager: true,
+          execute: async () => ({ content: [{ type: 'text', text: 'NOTE-SAME' }] }),
+        },
+      ],
+      shouldStop: () => false,
+      onEvent() {},
+    });
+    await session.prompt(prompt, []);
+    await session.dispose();
+    await setTimeout(2);
+  };
+  const text = (request: string[]) => request.join('\n');
+  const copies = (request: string[], marker: string) => text(request).split(marker).length - 1;
+  const pointer = (tool: string) =>
+    `This ${tool} result is identical to the earlier one in this conversation`;
+
+  // Two identical reads inside one turn: the second copy collapses.
+  const reportA = `REPORT-A ${'x'.repeat(3000)}`;
+  contents.push(reportA, reportA);
+  await turn('Synthetic first look', ['read_report', 'read_report', 'read_note', 'answer']);
+  assert.equal(copies(requests[2]!, 'REPORT-A'), 1);
+  assert.ok(text(requests[2]!).includes(pointer('read_report')));
+
+  // A fresh read of unchanged content in a new request stays in full: the
+  // earlier large copies aged out, so nothing identical remains to point at.
+  // The small note, never pruned, is the duplicate that collapses instead.
+  contents.push(reportA);
+  await turn('Synthetic second look', ['read_report', 'read_note', 'answer']);
+  assert.equal(copies(requests[5]!, 'REPORT-A'), 1);
+  assert.ok(!text(requests[5]!).includes(pointer('read_report')));
+  assert.ok(text(requests[5]!).includes('came from an earlier request and is no longer in context'));
+  assert.equal(copies(requests[6]!, 'NOTE-SAME'), 1);
+  assert.ok(text(requests[6]!).includes(pointer('read_note')));
+
+  // Changed content never collapses, even back to back in one turn.
+  contents.push(`REPORT-B ${'y'.repeat(3000)}`, `REPORT-C ${'z'.repeat(3000)}`);
+  await turn('Synthetic third look', ['read_report', 'read_report', 'answer']);
+  assert.equal(copies(requests[9]!, 'REPORT-B'), 1);
+  assert.equal(copies(requests[9]!, 'REPORT-C'), 1);
+  assert.ok(!text(requests[9]!).includes(pointer('read_report')));
+
+  // The session store keeps every original.
+  assert.ok((await localText(join(directory, threadId))).includes(reportA));
 });
 
 test('a failed model request leaves none of its unanswered input for later turns', async (t) => {

@@ -1,10 +1,20 @@
+; Modified November 23, 2026: opt-in Windows 10 22H2 admission with warning.
 Unicode true
 !include "MUI2.nsh"
 !include "x64.nsh"
-Name "Nod"
+!ifdef NOD_EXPERIMENTAL_WINDOWS10
+  !define NOD_INSTALL_KEY "nod-win10-experiment"
+  !define NOD_DISPLAY_NAME "Nod Windows 10 Experiment"
+  !define NOD_PUBLISHER "Unofficial source build"
+!else
+  !define NOD_INSTALL_KEY "nod"
+  !define NOD_DISPLAY_NAME "Nod"
+  !define NOD_PUBLISHER "n8n GmbH"
+!endif
+Name "${NOD_DISPLAY_NAME}"
 OutFile "${OUTPUT}"
-InstallDir "$LOCALAPPDATA\Programs\nod"
-InstallDirRegKey HKCU "Software\nod" "InstallDir"
+InstallDir "$LOCALAPPDATA\Programs\${NOD_INSTALL_KEY}"
+InstallDirRegKey HKCU "Software\${NOD_INSTALL_KEY}" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID zlib
 !ifdef SIGNER
@@ -22,21 +32,37 @@ AutoCloseWindow true
 
 Function .onInit
   ${IfNot} ${IsNativeAMD64}
-    MessageBox MB_ICONSTOP "Nod needs Windows 11 on an x64 computer." /SD IDOK
+    MessageBox MB_ICONSTOP "Nod needs an x64 computer." /SD IDOK
     SetErrorLevel 1
     Abort
   ${EndIf}
   ReadRegStr $0 HKLM "Software\Microsoft\Windows NT\CurrentVersion" "CurrentBuildNumber"
-  ${If} $0 < 22000
-    MessageBox MB_ICONSTOP "Nod needs Windows 11 or later." /SD IDOK
-    SetErrorLevel 1
-    Abort
-  ${EndIf}
+  !ifdef NOD_EXPERIMENTAL_WINDOWS10
+    ${If} $0 < 19045
+      MessageBox MB_ICONSTOP "This experimental build needs Windows 10 22H2 x64 or later." /SD IDOK
+      SetErrorLevel 1
+      Abort
+    ${EndIf}
+    ${If} $0 < 22000
+      MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "Experimental Windows 10 build. Runtime compatibility has not been verified. WSL 2 is still required. Select OK only to try this unsupported build." /SD IDCANCEL IDOK experimental_continue
+      SetErrorLevel 1
+      Abort
+      experimental_continue:
+    ${EndIf}
+  !else
+    ${If} $0 < 22000
+      MessageBox MB_ICONSTOP "Nod needs Windows 11 or later." /SD IDOK
+      SetErrorLevel 1
+      Abort
+    ${EndIf}
+  !endif
 FunctionEnd
 
 Function .onInstSuccess
   IfSilent installed
-  Exec '"$INSTDIR\nod.exe"'
+  !ifndef NOD_EXPERIMENTAL_WINDOWS10
+    Exec '"$INSTDIR\nod.exe"'
+  !endif
   installed:
 FunctionEnd
 
@@ -107,7 +133,7 @@ Section "nod"
   SetShellVarContext current
   SetOutPath "$INSTDIR"
   FileOpen $0 "$INSTDIR\.nod-installation" w
-  FileWrite $0 "nod-win32-x64"
+  FileWrite $0 "${NOD_INSTALL_KEY}-win32-x64"
   FileClose $0
   IfErrors 0 directory_marked
     SetErrorLevel 1
@@ -134,29 +160,29 @@ Section "nod"
       SetErrorLevel 1
       Abort
   runtime_copied:
-  CreateDirectory "$SMPROGRAMS\Nod"
-  CreateShortcut "$SMPROGRAMS\Nod\Nod.lnk" "$INSTDIR\nod.exe"
-  CreateShortcut "$SMPROGRAMS\Nod\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
-  CreateShortcut "$DESKTOP\Nod.lnk" "$INSTDIR\nod.exe"
-  WriteRegStr HKCU "Software\nod" "InstallDir" "$INSTDIR"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\nod" "DisplayName" "Nod"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\nod" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\nod" "Publisher" "n8n GmbH"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\nod" "UninstallString" '"$INSTDIR\Uninstall.exe"'
-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\nod" "NoModify" 1
-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\nod" "NoRepair" 1
+  CreateDirectory "$SMPROGRAMS\${NOD_DISPLAY_NAME}"
+  CreateShortcut "$SMPROGRAMS\${NOD_DISPLAY_NAME}\${NOD_DISPLAY_NAME}.lnk" "$INSTDIR\nod.exe"
+  CreateShortcut "$SMPROGRAMS\${NOD_DISPLAY_NAME}\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
+  CreateShortcut "$DESKTOP\${NOD_DISPLAY_NAME}.lnk" "$INSTDIR\nod.exe"
+  WriteRegStr HKCU "Software\${NOD_INSTALL_KEY}" "InstallDir" "$INSTDIR"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NOD_INSTALL_KEY}" "DisplayName" "${NOD_DISPLAY_NAME}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NOD_INSTALL_KEY}" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NOD_INSTALL_KEY}" "Publisher" "${NOD_PUBLISHER}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NOD_INSTALL_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NOD_INSTALL_KEY}" "NoModify" 1
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NOD_INSTALL_KEY}" "NoRepair" 1
 SectionEnd
 
 Section "Uninstall"
   Call un.CloseNod
   SetShellVarContext current
-  Delete "$DESKTOP\Nod.lnk"
-  Delete "$SMPROGRAMS\Nod\Nod.lnk"
-  Delete "$SMPROGRAMS\Nod\Uninstall.lnk"
-  RMDir "$SMPROGRAMS\Nod"
+  Delete "$DESKTOP\${NOD_DISPLAY_NAME}.lnk"
+  Delete "$SMPROGRAMS\${NOD_DISPLAY_NAME}\${NOD_DISPLAY_NAME}.lnk"
+  Delete "$SMPROGRAMS\${NOD_DISPLAY_NAME}\Uninstall.lnk"
+  RMDir "$SMPROGRAMS\${NOD_DISPLAY_NAME}"
   IfFileExists "$INSTDIR\.nod-installation" 0 files_removed
     RMDir /r "$INSTDIR"
   files_removed:
-  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\nod"
-  DeleteRegKey HKCU "Software\nod"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NOD_INSTALL_KEY}"
+  DeleteRegKey HKCU "Software\${NOD_INSTALL_KEY}"
 SectionEnd

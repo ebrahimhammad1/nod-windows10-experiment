@@ -76,6 +76,8 @@ export interface ModelChoice {
   textModelName?: string;
   contextWindow: number;
   pricing?: ModelPricing | 'variable';
+  // Per-model failure state, present on view() responses when recorded.
+  issue?: ModelIssue;
 }
 
 export interface ModelPricing {
@@ -90,7 +92,9 @@ export interface ModelPricing {
 export interface ModelSelection {
   connectionId: string;
   modelId: string;
-  effort: ModelEffort;
+  // 'auto' is a stored MODE resolved per request (resolveSelectionEffort);
+  // providers only ever see a concrete ModelEffort.
+  effort: ModelEffort | 'auto';
 }
 
 export type ModelLane = 'schedule' | 'background';
@@ -253,6 +257,9 @@ export interface ModelIssue {
 export interface ModelsResponse {
   connections: ModelConnection[];
   selection: ModelSelection | null;
+  // Base level a stored 'auto' selection currently resolves to, exposed so
+  // the card/picker can name it; the request-time layer may adapt further.
+  resolvedEffort?: ModelEffort;
   selectionIssue?: ModelIssue;
   routes: ModelRoutes;
   backups: ModelSelection[];

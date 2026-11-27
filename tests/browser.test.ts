@@ -8481,6 +8481,12 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
         if (path === '/api/trust') return Response.json({});
         if (path === '/api/speech') return Response.json({ transcription: true });
         if (path === '/api/onboarding/introduction') return Response.json({ messageId: null });
+        if (path === '/api/models') return Response.json({
+          connections: [{ id: 'synthetic-connection', provider: 'openrouter', method: 'key', label: 'Synthetic', status: 'connected', managed: false,
+            models: [{ id: 'synthetic-model', name: 'Synthetic Model', efforts: ['off', 'low', 'high'], images: false, contextWindow: 1000 }] }],
+          selection: { connectionId: 'synthetic-connection', modelId: 'synthetic-model', effort: 'high' },
+          routes: {}, backups: [], light: null,
+        });
         if (path === '/api/thread/stop') {
           stops++;
           return Response.json({});
@@ -8509,37 +8515,44 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
       };
       const activity = {
         turnId: 'synthetic-turn', taskId: null, title: null, step: null, site: null,
-        since: '2026-10-26T12:00:00Z',
+        since: new Date().toISOString(),
       };
       try {
         await render({ requestedMessage: { id: 'synthetic-send', text: 'Synthetic request' },
           refresh: () => new Promise(resolve => { releaseRefresh = resolve; }) });
         await settle(() => messageRequest && document.querySelector('.message-user'));
-        assert.equal(document.querySelector('.thinking .sr-only')?.textContent, 'Working…');
+        assert.equal(document.querySelector('.thinking')?.textContent?.includes('Working…'), true);
         await act(async () => releaseMessage(Response.json({
           messageId: messageRequest.clientMessageId, turnId: activity.turnId,
         })));
         await settle(() => releaseRefresh);
-        assert.equal(document.querySelector('.thinking .sr-only')?.textContent, 'Working…');
+        assert.equal(document.querySelector('.thinking')?.textContent?.includes('Working…'), true);
         state = { ...state, activity: [activity] };
         await act(async () => releaseRefresh());
         await render();
-        assert.equal(document.querySelector('.thinking .sr-only')?.textContent, 'Working…');
+        assert.equal(document.querySelector('.thinking')?.textContent?.includes('Working…'), true);
+        await settle(() => document.querySelector('.effort-picker-toggle'));
+        assert.equal(document.querySelector('.effort-picker-toggle')?.getAttribute('aria-label'), 'Thinking level: High');
+        await act(async () => {
+          const toggle = document.querySelector('.effort-picker-toggle');
+          toggle.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }));
+          toggle.click();
+        });
+        await settle(() => document.querySelectorAll('[role="menuitemradio"]').length === 3);
+        assert.deepEqual([...document.querySelectorAll('[role="menuitemradio"]')].map(item => item.textContent.trim()), ['Off', 'Low', 'High']);
+        assert.equal(document.querySelector('[role="menuitemradio"][aria-checked="true"]')?.textContent.trim(), 'High');
         const stop = document.querySelector('[aria-label="Stop all work"]');
         assert.ok(stop && !stop.disabled);
         await act(async () => stop.click());
         assert.equal(stops, 1);
         const quiet = new Date(Date.now() - 150_000).toISOString();
-        for (const [detail, line] of [[{ site: 'example.test', doing: 'tool' }, 'example.test'], [{ site: 'example.test', doing: 'model' }, null], [{ step: '   ' }, null], [{ doing: 'model' }, null],
-          [{ doing: 'tool', tool: 'Synthetic tool label' }, 'Synthetic tool label'], [{ doing: 'model', model: 'Synthetic Model' }, null],
+        for (const [detail, line] of [[{ site: 'example.test', doing: 'tool' }, 'example.test'], [{ site: 'example.test', doing: 'model' }, 'Waiting for the model'], [{ step: '   ' }, 'Working…'], [{ doing: 'model' }, 'Waiting for the model'],
+          [{ doing: 'tool', tool: 'Synthetic tool label' }, 'Synthetic tool label'], [{ doing: 'model', model: 'Synthetic Model' }, 'Waiting for Synthetic Model'],
           [{ doing: 'model', model: 'Synthetic Model', quietSince: quiet }, 'Synthetic Model']]) {
           state = { ...state, activity: [{ ...activity, ...detail }] };
           await render();
-          if (line) assert.ok(document.querySelector('.thinking')?.textContent?.includes(line));
-          else {
-            assert.equal(document.querySelector('.thinking .sr-only')?.textContent, 'Working…');
-            assert.ok(document.querySelector('.thinking .working-text [aria-hidden="true"]')?.textContent.trim());
-          }
+          assert.ok(document.querySelector('.thinking')?.textContent?.includes(line), line);
+          assert.ok(!/Nodding|cogs|switches|threads/.test(document.querySelector('.thinking')?.textContent ?? ''));
           assert.ok(document.querySelector('[aria-label="Stop all work"]'));
         }
         const task = { ...activity, turnId: 'synthetic-task-turn', taskId: 'synthetic-task', title: 'Synthetic task',
@@ -8550,13 +8563,23 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
         assert.ok(document.querySelector('[aria-label="Stop all work"]'));
         state = { ...state, activity: [activity, task] };
         await render();
-        assert.equal(document.querySelector('.thinking .sr-only')?.textContent, 'Working…');
+        assert.equal(document.querySelector('.thinking')?.textContent?.includes('Working…'), true);
         assert.ok(!document.querySelector('.thinking').textContent.includes('hotel'));
         state = { ...state, activity: [{ ...activity, doing: 'tool', site: 'example.test', step: 'Comparing prices',
+          since: new Date(Date.now() - 300_000).toISOString(),
           quietSince: new Date(Date.now() - 150_000).toISOString(), received: true }] };
         await render();
-        assert.equal(document.querySelector('.thinking .working-text')?.textContent, 'Comparing prices · example.test · 2 min');
+        assert.equal(document.querySelector('.thinking .working-text')?.textContent, 'Comparing prices · example.test · 5 min · no update for 2 min');
         assert.ok(document.querySelector('.thinking .working-receipt'));
+        // total time counts from turn start and survives queued -> model -> step transitions (not reset by the last event)
+        const start = new Date(Date.now() - 90_000).toISOString();
+        for (const [detail, text] of [[{ doing: 'queued', quietSince: new Date().toISOString() }, 'Waiting to start… · 1 min'],
+          [{ doing: 'model', model: 'M', quietSince: new Date().toISOString() }, 'Waiting for M · 1 min'],
+          [{ doing: 'tool', step: 'Checking', quietSince: new Date().toISOString() }, 'Checking · 1 min']]) {
+          state = { ...state, activity: [{ ...activity, since: start, ...detail }] };
+          await render();
+          assert.equal(document.querySelector('.thinking .working-text')?.textContent, text);
+        }
         state = { ...state, activity: [{ ...activity, background: true }] };
         await render();
         assert.equal(Boolean(document.querySelector('.thinking')), false);

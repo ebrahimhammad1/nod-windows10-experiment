@@ -133,6 +133,10 @@ export interface RuntimeContext {
   hourCycle?: 'auto' | 'h12' | 'h23';
   notificationRule?: string;
   rules?: string;
+  // Optional owner setting (preferences.terse_output, default off): terse
+  // style for external tool-result replies, and for the whole answer when
+  // the owner also selected a lower thinking level for the turn.
+  terseOutput?: boolean;
   quietHours?: boolean;
   account?: RuntimeAccount;
   connectedApps?: ConnectedApp[];
@@ -173,6 +177,11 @@ export interface RuntimeContext {
   };
   memory?: string;
   memoryBrief?: MemoryBrief;
+  // Light-turn rolling history: a shortened digest of the older messages
+  // dropped from recentConversation (originals recoverable via history_search).
+  // Retrieval-first conversation turn: only the recent window was injected;
+  // earlier messages, memory and work details load on demand via tools.
+  retrievalFirst?: boolean;
   learnedSkills?: Array<{ name: string; description: string }>;
   checkIn?: { budgetUsd: number; spentUsd: number; planUsd?: number };
   spendingLimitReached?: { monthlyUsd: number };
@@ -350,7 +359,15 @@ export type AgentEvent =
     }
   | { type: 'text_delta'; text: string }
   | { type: 'thinking'; title: string }
-  | { type: 'retry'; model: string; attempt: number; attempts: number }
+  | {
+      type: 'retry';
+      model: string;
+      attempt: number;
+      attempts: number;
+      // Precise reason when this is not a failure retry, e.g. quota pacing:
+      // shown instead of the generic "failed, trying again" activity line.
+      detail?: string;
+    }
   | { type: 'fallback'; from: string; to: string }
   | { type: 'final'; text: string }
   | ModelUsageObservation
@@ -373,6 +390,11 @@ export interface AgentSessionOptions extends ExecutionScope {
   restricted?: boolean;
   ephemeral?: boolean;
   newRequest?: boolean;
+  // Retrieval-first conversation turns declare only the minimal tool set;
+  // every other capability stays reachable through the nod_tool gateway and
+  // nod_tool_search discovery. Task, background, attachment and other
+  // full-context turns keep the complete declared surface.
+  deferTools?: boolean;
   scheduleCache?: 'short' | 'long';
   contextRestart?: string;
   keepWarm?(): Promise<boolean>;

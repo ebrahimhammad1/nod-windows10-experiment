@@ -59,6 +59,27 @@ export async function cancellationTransaction<T>(
 export async function initializeDatabase() {
   if (!databaseUrl)
     throw new Error('Run pnpm run dev to configure the local database, or set DATABASE_URL.');
+  // Serialize the whole one-time init across instances booting against the
+  // same database. Concurrent boots otherwise interleave the DDL batch and
+  // deadlock: CREATE UNIQUE INDEX IF NOT EXISTS takes a SHARE lock on the
+  // table and ALTER TABLE ADD COLUMN IF NOT EXISTS wants ACCESS EXCLUSIVE, so
+  // two sessions each holding SHARE while waiting for ACCESS EXCLUSIVE
+  // deadlock (40P01) and the losing instance crashes at startup. Measured
+  // with two real servers booting simultaneously on one database. Session-
+  // level lock on a dedicated client; the init body keeps using the pool.
+  const initClient = await pool.connect();
+  let initLocked = false;
+  try {
+    await initClient.query('SELECT pg_advisory_lock(727401)');
+    initLocked = true;
+    await initializeDatabaseInner();
+  } finally {
+    if (initLocked) await initClient.query('SELECT pg_advisory_unlock(727401)');
+    initClient.release();
+  }
+}
+
+async function initializeDatabaseInner() {
   await pool.query(`
     ${locksTable};
     CREATE TABLE IF NOT EXISTS threads (
@@ -184,6 +205,7 @@ export async function initializeDatabase() {
     ALTER TABLE preferences ALTER COLUMN proactive_paused SET DEFAULT true;
     ALTER TABLE preferences ADD COLUMN IF NOT EXISTS local_keep_out text[] NOT NULL DEFAULT '{}';
     ALTER TABLE preferences ADD COLUMN IF NOT EXISTS local_files_enabled boolean NOT NULL DEFAULT false;
+    ALTER TABLE preferences ADD COLUMN IF NOT EXISTS terse_output boolean NOT NULL DEFAULT false;
     ALTER TABLE preferences ADD COLUMN IF NOT EXISTS computer_use boolean NOT NULL DEFAULT false;
     ALTER TABLE preferences ADD COLUMN IF NOT EXISTS computer_keep_out text[] NOT NULL DEFAULT '{}';
     CREATE INDEX IF NOT EXISTS messages_owner_time ON messages(owner_id,created_at);
@@ -191,8 +213,22 @@ export async function initializeDatabase() {
     DROP TABLE IF EXISTS draft_instructions;
     CREATE INDEX IF NOT EXISTS messages_turn_time ON messages(turn_id,created_at);
     CREATE INDEX IF NOT EXISTS messages_attachments ON messages USING gin (attachments jsonb_path_ops);
-    CREATE INDEX IF NOT EXISTS messages_text_search ON messages USING gin (to_tsvector('english',text));
+    CREATE INDEX IF NOT EXISTS messages_text_search ON messages USING gin (to_tsvector('simple',text));
   `);
+  // The message search index moved from the 'english' text-search config to
+  // 'simple' (language-neutral, so Arabic and other non-English text is
+  // searchable). Rebuild it once when an older install has the old config.
+  // Runs under the init-wide advisory lock, so a second booting instance
+  // waits, then sees the rebuilt index and skips.
+  const searchIndex = await pool.query<{ def: string }>(
+    "SELECT indexdef AS def FROM pg_indexes WHERE schemaname='public' AND indexname='messages_text_search'",
+  );
+  if (searchIndex.rows[0] && !searchIndex.rows[0].def.includes("to_tsvector('simple'")) {
+    await pool.query('DROP INDEX messages_text_search');
+    await pool.query(
+      "CREATE INDEX messages_text_search ON messages USING gin (to_tsvector('simple',text))",
+    );
+  }
   await pool.query(
     `UPDATE turns SET status='cancelled',finished_at=now()
      WHERE owner_id=$1 AND source='event' AND starts_with(source_id,'activity-check:') AND status='queued'`,

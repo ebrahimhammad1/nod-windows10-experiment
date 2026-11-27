@@ -30,6 +30,7 @@ import { classifyVerificationReply, securityCodeIn } from '../../shared/verifica
 import { ChatTools } from '../components/chat-tools';
 import { ServiceLogo } from '../components/service-logo';
 import { Composer, type ComposerHandle, type ComposerSendResult } from '../components/composer';
+import { EffortPicker } from '../components/effort-picker';
 import { MessageBubble, WorkLabel, type MessageWork } from '../components/message';
 import { conversationFiles } from '../components/attachment-card';
 import { ArtifactWorkspace } from '../components/artifact-drawer';
@@ -142,7 +143,7 @@ function Working({
   routed?: MessageWork;
 }) {
   const found = items.find((item) => !item.background && !item.taskId);
-  const chat = found?.doing === 'queued' ? undefined : found;
+  const chat = found;
   const thinking = !writing && (Boolean(found) || sending);
   const receipt = items.some((item) => !item.background && item.received)
     ? 'Got your message. I’ll read it after this step.'
@@ -2694,6 +2695,7 @@ export function Chat({
           >
             <Composer
               key={`${ownerId}.${threadId}`}
+              accessory={<EffortPicker />}
               active={visible}
               ref={composer}
               draftKey={`nod.chat-draft.${ownerId}.${threadId}`}

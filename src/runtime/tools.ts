@@ -113,17 +113,29 @@ function rootObject<P extends TSchema>(schema: P): P {
           variants.findIndex((other) => JSON.stringify(other) === JSON.stringify(variant)) ===
           index,
       );
+      const advertised = required.has(key)
+        ? distinct
+        : distinct.map((variant) => {
+            // Keys only some actions use are advertised without minLength: models
+            // tend to fill every listed property with empty strings, and a
+            // minLength here rejects that filler before the strict per-action
+            // check can sort it out, forcing paid retry calls.
+            const { minLength: _minLength, ...rest } = variant as TSchema & {
+              minLength?: number;
+            };
+            return rest;
+          });
       const value =
-        distinct.length === 1
-          ? distinct[0]
+        advertised.length === 1
+          ? advertised[0]
           : Type.Union(
-              distinct,
-              distinct.every(
+              advertised,
+              advertised.every(
                 (variant) =>
                   typeof variant.const === 'string' &&
                   Object.keys(variant).every((key) => key === 'type' || key === 'const'),
               )
-                ? { enum: [...new Set(distinct.map((v) => v.const))] }
+                ? { enum: [...new Set(advertised.map((v) => v.const))] }
                 : {},
             );
       return [key, required.has(key) ? value : Type.Optional(value)];
@@ -417,7 +429,7 @@ export const toolDefinitions = {
       offset: Type.Optional(Type.Integer({ minimum: 0 })),
       name: Type.Optional(Type.String({ minLength: 1 })),
     }),
-    true,
+    false,
     ['sign_in', 'browser_session', 'pay'],
   ),
   sign_in: defineTool(
@@ -571,7 +583,6 @@ export const toolDefinitions = {
         ),
       ),
     }),
-    true,
   ),
   computer: defineTool(
     'computer',
@@ -601,7 +612,6 @@ export const toolDefinitions = {
       role: Type.Optional(Type.String()),
       keys: Type.Optional(Type.String()),
     }),
-    true,
   ),
   manage_apps: defineTool(
     'manage_apps',
@@ -618,16 +628,14 @@ export const toolDefinitions = {
       ),
       proposal: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     }),
-    true,
   ),
   memory: defineTool(
     'memory',
-    'Owner memory, chat history, notification preferences and standing rules.\nmemory_find {query,area?} and memory_read {path} read saved facts (areas: about,preferences,people,routines,lessons). Check memory and history for earlier facts or advice; collect all relevant mentions for totals, and use the latest statement when facts change. Do not guess missing facts. memory_learn {messages?} asks the memory model to learn from owner messages, never your own text. Use it for lasting facts or explicit requests, never tasks, standing rules, guesses, secrets or outside content. It always reads the current owner message and their last 10 messages; pass IDs only for older owner messages, never a guessed ID or message text. Sensitive facts require sensitiveTopics enabled or an explicit save request. Corrections archive old notes. memory_forget {path} removes a requested note. memory_control {enabled?,clear?,quote} needs the complete current owner message; clear keeps chat history.\nhistory_search {query?,from?,to?,before?,cursor?,order?,around?} searches earlier messages. Dates are YYYY-MM-DD in owner time. Page with cursor=nextCursor, keeping the same query, dates and order (relevance or newest). complete covers search matches only. Dates and before filter message times, not event dates. around reads a result in context. Read source messages before claims about earlier work.\nnotification_preferences_get {} reads settings. notification_preferences_update partially changes notificationRule, rules, speechReply (auto,voice,always,never), timeZone (IANA or null), locale (tag or null), hourCycle (auto,h12,h23), quietHoursEnabled, quietStart/quietEnd (HH:MM), proactivePaused, or localFilesEnabled. rules holds the standing rules of the owner. When they ask to set, add or change a standing rule, save it there, never with memory_learn. When the owner asks to start or resume automatic preparation, set proactivePaused:false. When the owner asks to stop automatic preparation, set proactivePaused:true. When they ask to stop all background work, set proactivePaused:true and run task stop {}, which cancels current background tasks and scheduled runs; enabled schedules still fire later, so name them and offer to pause them. A notification rule alone does not enable it. Local file access applies to allowed files in the home folder and external drives, only in work the owner starts. The desktop app is required. Device permissions need Settings on that device.',
+    'Owner memory, chat history, notification preferences and standing rules.\nmemory_find {query,area?} and memory_read {path,offset?} read saved facts (areas: about,preferences,people,routines,lessons). A long note returns in ~3000-byte windows; continue with offset=nextOffset (textLength is exact). Check memory and history for earlier facts or advice; collect all relevant mentions for totals, and use the latest statement when facts change. Do not guess missing facts. memory_learn {messages?} asks the memory model to learn from owner messages, never your own text. Use it for lasting facts or explicit requests, never tasks, standing rules, guesses, secrets or outside content. It always reads the current owner message and their last 10 messages; pass IDs only for older owner messages, never a guessed ID or message text. Sensitive facts require sensitiveTopics enabled or an explicit save request. Corrections archive old notes. memory_forget {path} removes a requested note. memory_control {enabled?,clear?,quote} needs the complete current owner message; clear keeps chat history.\nhistory_search {query?,from?,to?,before?,cursor?,order?,around?} searches earlier messages. Dates are YYYY-MM-DD in owner time. Page with cursor=nextCursor, keeping the same query, dates and order (relevance or newest). complete covers search matches only. Dates and before filter message times, not event dates. around {id,offset?} reads a result in context: the target in 3000-character windows, continuing with offset=nextTargetOffset while shortened, plus nearby rows as budget allows (contextComplete says whether any were left out; read around the id of a boundary row for the rest). turnsTruncated says how many matching turn titles were left out; list older ones by repeating with before set to the last listed turn id. Read source messages before claims about earlier work.\nnotification_preferences_get {} reads settings. notification_preferences_update partially changes notificationRule, rules, speechReply (auto,voice,always,never), timeZone (IANA or null), locale (tag or null), hourCycle (auto,h12,h23), quietHoursEnabled, quietStart/quietEnd (HH:MM), proactivePaused, or localFilesEnabled. rules holds the standing rules of the owner. When they ask to set, add or change a standing rule, save it there, never with memory_learn. When the owner asks to start or resume automatic preparation, set proactivePaused:false. When the owner asks to stop automatic preparation, set proactivePaused:true. When they ask to stop all background work, set proactivePaused:true and run task stop {}, which cancels current background tasks and scheduled runs; enabled schedules still fire later, so name them and offer to pause them. A notification rule alone does not enable it. Local file access applies to allowed files in the home folder and external drives, only in work the owner starts. The desktop app is required. Device permissions need Settings on that device.',
     Type.Object({
       action: literals(memoryActions),
       args: Type.Record(Type.String(), Type.Unknown()),
     }),
-    true,
   ),
   nod: defineTool(
     'nod',
@@ -757,14 +765,32 @@ function bind<P extends TSchema>(
                 ),
               )
               .find((matches) => matches?.length === 1)?.[0] ?? strict;
-          if (!Value.Check(selected, params)) {
-            const errors = [...Value.Errors(selected, params)]
+          let candidate = params;
+          if (selected !== strict) {
+            // Once the discriminator picks one action, drop empty-string filler
+            // for fields that belong to other actions; models add that filler
+            // because the flattened advertisement lists every field. Real values
+            // for other actions stay, so the strict check still rejects them.
+            const allowed = new Set(
+              Object.keys((selected as ObjectSchema).properties ?? {}),
+            );
+            const memberRequired = new Set((selected as ObjectSchema).required ?? []);
+            candidate = Object.fromEntries(
+              Object.entries(params as Record<string, unknown>).filter(([key, value]) => {
+                const empty = value === '' || value === undefined || value === null;
+                if (!empty) return true;
+                return allowed.has(key) && memberRequired.has(key);
+              }),
+            ) as Static<P>;
+          }
+          if (!Value.Check(selected, candidate)) {
+            const errors = [...Value.Errors(selected, candidate)]
               .slice(0, 8)
               .map((error) => `${error.path || '/'}: ${error.message}`)
               .join('; ');
             throw new Error(`Invalid ${tool.name} input: ${errors}. Valid forms: ${forms}.`);
           }
-          return execute(params);
+          return execute(candidate);
         }
       : execute,
   } as NodTool;

@@ -1742,6 +1742,16 @@ test(
             await preferences.update({ quietHoursEnabled: false });
             assert.equal((await preferences.get()).speechVoice, 'kokoro:bf_emma');
             assert.equal((await preferences.get()).proactivePaused, false);
+            // Terse output is off by default, persists independently, and
+            // survives unrelated preference updates.
+            assert.equal((await preferences.get()).terseOutput, false);
+            await preferences.update({ terseOutput: true });
+            assert.equal((await preferences.get()).terseOutput, true);
+            assert.equal((await preferences.get()).speechVoice, 'kokoro:bf_emma');
+            await preferences.update({ speechReply: 'voice' });
+            assert.equal((await preferences.get()).terseOutput, true);
+            assert.equal((await foreign.get()).terseOutput, false);
+            await preferences.update({ speechReply: 'auto' });
             await assert.rejects(
               preferences.update({ speechVoice: 'https://foreign.example/voice' }),
             );
@@ -8186,14 +8196,21 @@ test(
         },
       );
       await t.test(
-        'history search ranks word forms, keeps local dates and reads around a hit inside the owner’s active thread',
+        // TIE-BREAK TEST: with the 'simple' config there is no stemming, so
+        // this no longer proves word-form ranking: 'buying'!='buy' and
+        // 'properties'!='property' as tokens, both rows tie at one matched
+        // lexeme each. Rank ties break by created_at DESC then id DESC, so
+        // the fixture gives both rows the SAME created_at and pinned ids
+        // (best > newer) to make the id decide deterministically.
+        // Merged primary+fallback ranking (which would give 'best' a real
+        // lead) is a deferred decision, NOT part of P10.
+        'history search orders tied primary hits by id, keeps local dates and reads around a hit inside the owner’s active thread',
         async () => {
           const foreignThread = randomUUID();
           await db.pool.query("INSERT INTO threads(id,owner_id) VALUES($1,'history-other-owner')", [
             foreignThread,
           ]);
-          const add = async (text: string, at: string, owner = ownerId, threadId = freshThread) => {
-            const id = randomUUID();
+          const add = async (text: string, at: string, owner = ownerId, threadId = freshThread, id = randomUUID()) => {
             await db.pool.query(
               "INSERT INTO messages(id,owner_id,role,text,thread_id,created_at) VALUES($1,$2,'user',$3,$4,$5)",
               [id, owner, text, threadId, at],
@@ -8215,9 +8232,12 @@ test(
               .filter((message) => message.match !== false)
               .map((message) => message.id);
 
-          const best = await add('I am buying two properties in Brookside', '2019-03-01T10:00:00Z');
-          const newer = await add('The property tax letter arrived', '2019-03-02T10:00:00Z');
-          const after = await add('Lunch with Ana on Friday', '2019-03-03T10:00:00Z');
+          // Same created_at for best and newer + pinned ids with best >
+          // newer: the created_at-DESC tie-break cannot decide, so the
+          // id-DESC tie-break decides deterministically.
+          const best = await add('I am buying two properties in Brookside', '2019-03-01T10:00:00Z', ownerId, freshThread, 'ffffffff-ffff-4fff-bfff-fffffffffff9');
+          const newer = await add('The property tax letter arrived', '2019-03-01T10:00:00Z', ownerId, freshThread, 'ffffffff-ffff-4fff-bfff-fffffffffff1');
+          const after = await add('Lunch with Ana on Friday', '2019-03-03T10:00:00Z', ownerId, freshThread, '00000000-0000-4000-8000-0000000000b3');
           await hidden('We are buying a property near the river', '2019-03-04T10:00:00Z');
           assert.deepEqual(await search({ query: 'which property did I buy' }), [best, newer]);
           assert.deepEqual(
@@ -8225,14 +8245,20 @@ test(
               id,
               match,
             ]),
+            // 'after' sits inside the top hit's context block: context rows
+            // inherit the covering match's place, so it displays right after
+            // 'best'. The MATCH order [best, newer] is what ranking owns.
             [
               [best, true],
-              [newer, true],
               [after, false],
+              [newer, true],
             ],
           );
-          assert.deepEqual(await search({ query: 'which property did I buy', before: newer }), [
+          // The (created_at,id) boundary cuts before 'after'; both pinned
+          // tie rows are older and keep their pinned rank order.
+          assert.deepEqual(await search({ query: 'which property did I buy', before: after }), [
             best,
+            newer,
           ]);
 
           const previousZone = (
@@ -8315,12 +8341,107 @@ test(
           assert.equal(excerpt.shortened, true);
           assert.match(excerpt.text, /spare key is with Marisol/);
           assert.ok(excerpt.text.length < 1200);
-          const whole = (
-            (await personal.manage('history_search', { around: long })) as {
-              messages: Array<{ id: string; text: string }>;
+          // A message over one window pages by offset; the windows reassemble
+          // into the complete original with exact length reported throughout.
+          const longText = `${filler}The spare key is with Marisol next door. ${filler}`;
+          type AroundPage = {
+            messages: Array<{ id: string; text: string; shortened: boolean }>;
+            complete: boolean;
+            nextTargetOffset?: number;
+            targetLength?: number;
+          };
+          const windows: string[] = [];
+          let offset: number | undefined;
+          for (;;) {
+            const aroundPage = (await personal.manage('history_search', {
+              around: long,
+              ...(offset === undefined ? {} : { offset }),
+            })) as AroundPage;
+            const row = aroundPage.messages.find((message) => message.id === long)!;
+            windows.push(row.text);
+            assert.equal(row.shortened, !aroundPage.complete);
+            assert.equal(aroundPage.targetLength, longText.length);
+            if (aroundPage.complete) break;
+            assert.ok(aroundPage.nextTargetOffset);
+            offset = aroundPage.nextTargetOffset;
+          }
+          assert.ok(windows.length >= 2, 'a message over one window must page');
+          assert.equal(windows.join(''), longText);
+          assert.match(windows.join(''), /spare key is with Marisol/);
+          const whole = { text: windows[0]! };
+          // A window read drops the farthest context rows, never the target,
+          // when the page would pass the byte budget.
+          const cluster: string[] = [];
+          for (let index = 0; index < 11; index++)
+            cluster.push(
+              await add(`windowcontext ${index} ${'ctx '.repeat(200)}`, minute(40 + index)),
+            );
+          const crowded = (await personal.manage('history_search', {
+            around: cluster[5]!,
+          })) as {
+            messages: Array<{ id: string; text: string }>;
+            contextComplete?: boolean;
+          };
+          const crowdedBytes = crowded.messages.reduce(
+            (total, message) => total + Buffer.byteLength(message.text),
+            0,
+          );
+          assert.ok(crowdedBytes <= 6000, `window page carries ${crowdedBytes} text bytes`);
+          assert.equal(crowded.contextComplete, false);
+          assert.ok(crowded.messages.some(({ id }) => id === cluster[5]));
+          // A dropped context row stays exactly retrievable: reading around
+          // the nearest kept row on that side returns it.
+          const keptIds = new Set(crowded.messages.map(({ id }) => id));
+          const droppedBefore = cluster.slice(0, 5).filter((id) => !keptIds.has(id));
+          assert.ok(droppedBefore.length > 0, 'expected farthest context rows to drop');
+          const nearestKept = cluster.slice(0, 5).find((id) => keptIds.has(id))!;
+          const widened = (await personal.manage('history_search', {
+            around: nearestKept,
+          })) as { messages: Array<{ id: string }> };
+          for (const id of droppedBefore)
+            assert.ok(
+              widened.messages.some((message) => message.id === id),
+              `dropped context row ${id} not recoverable around its neighbour`,
+            );
+          // Omitted turn titles page exactly: before=<last listed turn id>
+          // continues the bounded list until every matching turn was shown.
+          const turnIds: string[] = [];
+          for (let index = 0; index < 15; index++) {
+            const id = randomUUID();
+            await db.pool.query(
+              "INSERT INTO turns(id,owner_id,thread_id,session_id,prompt,source,status,created_at) VALUES($1,$2,$3,$3,$4,'user','succeeded',$5)",
+              [
+                id,
+                ownerId,
+                freshThread,
+                `turntitle ${index} ${'x'.repeat(170)}`,
+                `2019-08-01T10:${String(index).padStart(2, '0')}:00Z`,
+              ],
+            );
+            turnIds.push(id);
+          }
+          type TurnPage = { turns: Array<{ id: string }>; turnsTruncated?: number };
+          const shownTurns = new Set<string>();
+          let turnBoundary: string | undefined;
+          let truncatedSeen = false;
+          for (let page = 0; ; page++) {
+            const turnPage = (await personal.manage('history_search', {
+              from: '2019-08-01',
+              to: '2019-08-01',
+              ...(turnBoundary ? { before: turnBoundary } : {}),
+            })) as TurnPage;
+            if (turnPage.turnsTruncated) truncatedSeen = true;
+            for (const turn of turnPage.turns) {
+              assert.ok(!shownTurns.has(turn.id), `turn ${turn.id} listed twice`);
+              shownTurns.add(turn.id);
             }
-          ).messages.find((message) => message.id === long)!;
-          assert.ok(whole.text.length > 4000);
+            if (!turnPage.turnsTruncated) break;
+            turnBoundary = turnPage.turns.at(-1)!.id;
+            assert.ok(page < 5, 'turn-title continuation did not terminate');
+          }
+          assert.ok(truncatedSeen, 'expected the 1.5 KB title budget to engage');
+          for (const id of turnIds)
+            assert.ok(shownTurns.has(id), `turn ${id} never listed`);
           const historyTurn = randomUUID();
           await db.pool.query(
             "INSERT INTO turns(id,owner_id,thread_id,session_id,prompt,source,status,created_at) VALUES($1,$2,$3,$3,'Synthetic history turn lookup','user','succeeded','2019-04-01T10:00:00Z')",
@@ -8337,7 +8458,7 @@ test(
             messages: Array<{ id: string; text: string; shortened: boolean }>;
           };
           assert.equal(turnContext.messages.find(({ id }) => id === long)?.text, whole.text);
-          assert.equal(turnContext.messages.find(({ id }) => id === long)?.shortened, false);
+          assert.equal(turnContext.messages.find(({ id }) => id === long)?.shortened, true);
           const hiddenAnchor = await add('Synthetic hidden anchor', minute(15));
           const visibleAnchor = await add('Synthetic visible anchor', minute(16));
           const visibleTurn = randomUUID();
@@ -8383,6 +8504,243 @@ test(
           assert.ok(listed[0].text.length > 0 && listed[0].text.length < 1200);
           for (const id of await hidden('Hidden hit', minute(13)))
             await assert.rejects(search({ around: id }), /unavailable/);
+        },
+      );
+      await t.test(
+        'history search finds Arabic, mixed-language and unstemmed English rows',
+        async () => {
+          const add = async (text: string, at: string) => {
+            const id = randomUUID();
+            await db.pool.query(
+              "INSERT INTO messages(id,owner_id,role,text,thread_id,created_at) VALUES($1,$2,'user',$3,$4,$5)",
+              [id, ownerId, text, freshThread, at],
+            );
+            return id;
+          };
+          const search = async (args: Record<string, unknown>) =>
+            (
+              (await personal.manage('history_search', args)) as {
+                messages: Array<{ id: string; match?: boolean }>;
+              }
+            ).messages
+              .filter((message) => message.match !== false)
+              .map((message) => message.id);
+
+          const arabic = await add(
+            'أرجو إبلاغي بآخر تطورات الطيران المدني',
+            '2019-09-01T10:00:00Z',
+          );
+          const prefixed = await add('تطورات بالطيران المدني هذا الأسبوع', '2019-09-02T10:00:00Z');
+          const mixed = await add('حجزت p10flight تذكرة الطيران صباحاً', '2019-09-03T10:00:00Z');
+          const plural = await add('I booked two p10flights yesterday', '2019-09-04T10:00:00Z');
+          await add('Dinner with the neighbours on Sunday', '2019-09-05T10:00:00Z');
+
+          // Exact Arabic word, prefix-joined بالطيران and the mixed row all
+          // match — but only when the FALLBACK serves the query. On SQL_ASCII
+          // the primary returns zero Arabic rows and the fallback finds all
+          // three (ties: created_at DESC). On UTF8 the primary hits the two
+          // exact-token rows, partial-primary semantics suppress the fallback,
+          // and the prefix-joined row is NOT found until merged
+          // primary+fallback ranking ships (deferred decision, not P10).
+          const serverEncoding = (
+            await db.pool.query<{ server_encoding: string }>('SHOW server_encoding')
+          ).rows[0].server_encoding;
+          assert.deepEqual(
+            await search({ query: 'الطيران' }),
+            serverEncoding === 'UTF8' ? [mixed, arabic] : [mixed, prefixed, arabic],
+            `query الطيران on ${serverEncoding}`,
+          );
+          // A prefix-joined query term reaches the prefixed row.
+          assert.deepEqual(await search({ query: 'بالطيران' }), [prefixed]);
+          // A mixed-language query ranks the row matching both terms first.
+          // p10flight is a real token in the mixed row, so this is a PRIMARY
+          // hit and the fallback stays off (partial-primary semantics).
+          assert.deepEqual(await search({ query: 'تذكرة p10flight' }), [mixed]);
+          // The unstemmed singular still reaches the plural row: p10flight as a
+          // token exists only in the mixed row, so this query is also primary.
+          // The pure-fallback plural case uses a term that is no token anywhere:
+          assert.deepEqual(await search({ query: 'p10flight' }), [mixed]);
+          assert.deepEqual(await search({ query: 'p10flight', from: '2019-09-04' }), [plural]);
+        },
+      );
+      await t.test(
+        'history search keeps rank order for adjacent matches with overlapping context windows',
+        async () => {
+          // Regression test for the hydration swap fixed in a60aa96f: two
+          // time-adjacent matches whose rank order is OPPOSITE to time order,
+          // close enough that their +/-1 context windows overlap. The display
+          // layer must keep the ranking order, not re-sort by time.
+          const add = async (text: string, at: string) => {
+            const id = randomUUID();
+            await db.pool.query(
+              "INSERT INTO messages(id,owner_id,role,text,thread_id,created_at) VALUES($1,$2,'user',$3,$4,$5)",
+              [id, ownerId, text, freshThread, at],
+            );
+            return id;
+          };
+          const shown = async (query: string) =>
+            (
+              (await personal.manage('history_search', { query })) as {
+                messages: Array<{ id: string; match?: boolean }>;
+              }
+            ).messages;
+
+          // oneTerm is older but matches one query token; twoTerms is newer
+          // and matches both, so it ranks first (higher idf sum). Unique
+          // tokens keep the shared fixture thread's other messages out.
+          const oneTerm = await add('zxqvalpha alone in this note', '2019-11-01T10:00:00Z');
+          const twoTerms = await add('zxqvalpha and zxqvbeta together', '2019-11-02T10:00:00Z');
+          const decoy = await add('zxqv unrelated filler note', '2019-11-03T10:00:00Z');
+
+          const messages = await shown('zxqvalpha zxqvbeta');
+          const matches = messages.filter((message) => message.match !== false).map((m) => m.id);
+          assert.deepEqual(matches, [twoTerms, oneTerm], 'rank order survives overlapping context windows');
+          // The adjacent non-matching row stays visible as context, unflagged.
+          const decoyRow = messages.find((message) => message.id === decoy);
+          assert.ok(decoyRow && decoyRow.match === false, 'context row present and unflagged');
+        },
+      );
+      await t.test(
+        'history search fallback runs only on a complete primary miss',
+        async () => {
+          const add = async (text: string, at: string) => {
+            const id = randomUUID();
+            await db.pool.query(
+              "INSERT INTO messages(id,owner_id,role,text,thread_id,created_at) VALUES($1,$2,'user',$3,$4,$5)",
+              [id, ownerId, text, freshThread, at],
+            );
+            return id;
+          };
+          const search = async (query: string) =>
+            (
+              (await personal.manage('history_search', { query })) as {
+                messages: Array<{ id: string; match?: boolean }>;
+              }
+            ).messages
+              .filter((message) => message.match !== false)
+              .map((message) => message.id);
+
+          // "xxp10beanx" carries the substring but not the token, so the
+          // primary FTS misses it while "p10bean" matches as a token. Unique
+          // terms keep the shared fixture thread's other messages out.
+          const tokenHit = await add('My p10bean grinder settings', '2019-10-01T10:00:00Z');
+          const substringOnly = await add('The xxp10beanx brew guide', '2019-10-02T10:00:00Z');
+          // A primary hit returns alone: the fallback stays off, so a row that
+          // only the substring search would find is not listed.
+          assert.deepEqual(await search('p10bean'), [tokenHit]);
+          // A complete primary miss fires the fallback, which finds the
+          // substring-only row.
+          assert.deepEqual(await search('xp10beanx'), [substringOnly]);
+        },
+      );
+      await t.test(
+        'history search fallback pages through every substring match',
+        async () => {
+          const add = async (text: string, at: string) => {
+            const id = randomUUID();
+            await db.pool.query(
+              "INSERT INTO messages(id,owner_id,role,text,thread_id,created_at) VALUES($1,$2,'user',$3,$4,$5)",
+              [id, ownerId, text, freshThread, at],
+            );
+            return id;
+          };
+          const search = async (args: Record<string, unknown>) =>
+            (await personal.manage('history_search', args)) as {
+              messages: Array<{ id: string; match?: boolean }>;
+              nextCursor?: string | null;
+              totalMatches?: number;
+            };
+          const matched = (page: { messages: Array<{ id: string; match?: boolean }> }) =>
+            page.messages.filter((message) => message.match !== false).map((message) => message.id);
+
+          // The term sits inside a larger token, so the primary FTS misses all
+          // 25 rows and the fallback must page them without drops or repeats.
+          const ids: string[] = [];
+          for (let index = 0; index < 25; index++)
+            ids.push(
+              await add(
+                `note ${index} about prexxpagingbeaconxxpost plans`,
+                `2019-11-01T10:${String(index).padStart(2, '0')}:00Z`,
+              ),
+            );
+          const page1 = await search({ query: 'xxpagingbeaconxx' });
+          assert.equal(page1.totalMatches, 25);
+          assert.equal(matched(page1).length, 20);
+          assert.ok(page1.nextCursor, 'first fallback page must hand a cursor');
+          const page2 = await search({ query: 'xxpagingbeaconxx', cursor: page1.nextCursor });
+          assert.equal(page2.totalMatches, 25);
+          assert.equal(matched(page2).length, 5);
+          assert.equal(page2.nextCursor, null);
+          const overlap = matched(page2).filter((id) => matched(page1).includes(id));
+          assert.deepEqual(overlap, []);
+          assert.deepEqual(
+            new Set([...matched(page1), ...matched(page2)]),
+            new Set(ids),
+            'every fallback match is shown exactly once across the pages',
+          );
+          // A cursor that is not one of the fallback matches is still rejected.
+          await assert.rejects(
+            search({ query: 'xxpagingbeaconxx', cursor: randomUUID() }),
+            /does not match the search/,
+          );
+        },
+      );
+      await t.test(
+        'history search pages stay byte-bounded and the cursor reaches every match',
+        async () => {
+          const add = async (text: string, at: string) => {
+            const id = randomUUID();
+            await db.pool.query(
+              "INSERT INTO messages(id,owner_id,role,text,thread_id,created_at) VALUES($1,$2,'user',$3,$4,$5)",
+              [id, ownerId, text, freshThread, at],
+            );
+            return id;
+          };
+          const ids: string[] = [];
+          for (let index = 0; index < 12; index++)
+            ids.push(
+              await add(
+                `pagingbeacon ${index} ${'filler '.repeat(150)}`,
+                `2019-07-01T10:${String(index).padStart(2, '0')}:00Z`,
+              ),
+            );
+          type Page = {
+            messages: Array<{ id: string; text: string; match?: boolean }>;
+            complete: boolean;
+            nextCursor: string | null;
+          };
+          const seen = new Set<string>();
+          let cursor: string | undefined;
+          let pages = 0;
+          for (;;) {
+            const result = (await personal.manage('history_search', {
+              query: 'pagingbeacon',
+              ...(cursor ? { cursor } : {}),
+            })) as Page;
+            pages += 1;
+            const bytes = result.messages.reduce(
+              (total, message) => total + Buffer.byteLength(message.text),
+              0,
+            );
+            assert.ok(bytes <= 6000, `page ${pages} carries ${bytes} text bytes`);
+            for (const message of result.messages) {
+              if (!message.match) continue;
+              assert.ok(!seen.has(message.id), `match ${message.id} shown twice`);
+              seen.add(message.id);
+            }
+            if (result.complete) {
+              assert.equal(result.nextCursor, null);
+              break;
+            }
+            assert.ok(result.nextCursor, 'a truncated page must offer a cursor');
+            cursor = result.nextCursor;
+            assert.ok(pages < 12, 'cursor walk did not terminate');
+          }
+          assert.ok(
+            pages >= 2,
+            `expected the bound to split 12 long matches, got ${pages} page(s)`,
+          );
+          assert.deepEqual([...seen].sort(), [...ids].sort());
         },
       );
       await t.test(
@@ -11133,7 +11491,7 @@ test(
                 assert.equal(
                   (
                     await db.pool.query(
-                      "SELECT 1 FROM messages WHERE turn_id=$1 AND role='assistant'",
+                      "SELECT 1 FROM messages WHERE turn_id=$1 AND role='assistant' AND COALESCE(stream_id,'') NOT LIKE 'ack:%'",
                       [active!.turnId],
                     )
                   ).rowCount,
@@ -11156,6 +11514,173 @@ test(
         },
       );
 
+      await t.test(
+        'a web turn gets one receipt when real execution starts, not for quick answers',
+        async () => {
+          const original = dependencies.runTurn;
+          try {
+            for (const [prompt, steps, expected] of [
+              ['ack-quick Synthetic question', ['send message'], 0],
+              ['ack-work Synthetic request', ['set status', 'bash', 'bash', 'send message'], 1],
+              ['ack-arabic طلب تجريبي', ['bash'], 1],
+            ] as const) {
+              dependencies.runTurn = async (context) => {
+                if (context.prompt !== prompt) return original!(context);
+                for (const step of steps) await context.emit('tool_start', step);
+                await context.reply(`done: ${context.prompt}`);
+                return { status: 'succeeded' };
+              };
+              const sent = await thread.submitUserMessage(prompt);
+              await waitFor(settled(sent.turnId));
+              const rows = (
+                await db.pool.query(
+                  "SELECT text,stream_id FROM messages WHERE turn_id=$1 AND role='assistant' ORDER BY created_at,id",
+                  [sent.turnId],
+                )
+              ).rows;
+              const acks = rows.filter((row) => String(row.stream_id).startsWith('ack:'));
+              assert.equal(acks.length, expected, prompt);
+              if (expected) {
+                assert.equal(acks[0].stream_id, `ack:${sent.turnId}`);
+                assert.equal(
+                  rows[0].stream_id,
+                  acks[0].stream_id,
+                  'receipt precedes the final reply',
+                );
+                assert.equal(rows.at(-1)!.text, `done: ${prompt}`);
+                assert.match(
+                  acks[0].text,
+                  prompt.includes('طلب') ? /[\u0600-\u06ff]/ : /started working/,
+                );
+              } else assert.equal(rows.at(-1)!.text, `done: ${prompt}`);
+            }
+          } finally {
+            dependencies.runTurn = original;
+          }
+        },
+      );
+      await t.test(
+        'a turn whose tool already ran is never executed again after a retryable model failure',
+        async () => {
+          const original = dependencies.runTurn;
+          const prompt = `side-effect-replay ${randomUUID()}`;
+          let runs = 0;
+          let sideEffects = 0;
+          try {
+            dependencies.runTurn = async (context) => {
+              if (context.prompt !== prompt) return original!(context);
+              runs++;
+              await context.emit('tool_start', 'bash');
+              sideEffects++;
+              await context.emit('tool_complete', 'bash');
+              throw new ModelRequestError('429 Too Many Requests');
+            };
+            const sent = await thread.submitUserMessage(prompt);
+            await waitFor(settled(sent.turnId));
+            assert.equal(await turnStatus(sent.turnId), 'failed');
+            await delay(1500);
+            assert.equal(runs, 1, 'the turn ran once');
+            assert.equal(sideEffects, 1, 'the outside action ran once');
+            assert.equal(await turnStatus(sent.turnId), 'failed');
+          } finally {
+            dependencies.runTurn = original;
+          }
+        },
+      );
+      await t.test(
+        'the receipt is committed before the real tool dispatch runs, and a later failure ends the turn visibly',
+        async () => {
+          const original = dependencies.runTurn;
+          const originalIntegration = dependencies.integration;
+          try {
+            for (const failing of [false, true]) {
+              const prompt = `ack-order ${failing ? 'failure' : 'success'} ${randomUUID()}`;
+              let turnId = '';
+              let toolResult = '';
+              const seen: Array<{ ackBeforeDispatch: boolean; finalBeforeDispatch: boolean }> = [];
+              const runtime = createAgentRuntime({
+                workspace: fakeWorkspace(),
+                computer: fakeComputer(),
+                agent: {
+                  open: async (input) => ({
+                    resumed: false,
+                    async prompt() {
+                      const opened = await input.tools
+                        .find((tool) => tool.name === 'apps')!
+                        .execute({
+                          action: 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID',
+                          args: { message_id: 'synthetic-ack-order' },
+                        })
+                        .catch((error: unknown) => `threw: ${String(error)}`);
+                      toolResult = JSON.stringify(opened).slice(0, 300);
+                      if (failing) throw new ModelRequestError('429 Too Many Requests');
+                      await input.tools
+                        .find((tool) => tool.name === 'send_message')!
+                        .execute({ text: `done: ${prompt}`, intent: 'final' });
+                    },
+                    abort() {},
+                    dispose() {},
+                  }),
+                  dispose() {},
+                },
+              });
+              dependencies.integration = async (turn, action, args, options) => {
+                if (action === 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID' && turnId) {
+                  const rows = (
+                    await db.pool.query(
+                      "SELECT stream_id,text FROM messages WHERE turn_id=$1 AND role='assistant'",
+                      [turnId],
+                    )
+                  ).rows;
+                  seen.push({
+                    ackBeforeDispatch: rows.some(
+                      (row) => String(row.stream_id) === `ack:${turnId}`,
+                    ),
+                    finalBeforeDispatch: rows.some((row) => row.text === `done: ${prompt}`),
+                  });
+                }
+                return originalIntegration!(turn, action, args, options);
+              };
+              dependencies.runTurn = (context) => {
+                if (context.prompt !== prompt) return original!(context);
+                turnId = context.turnId;
+                return runtime.runTurn(context);
+              };
+              const sent = await thread.submitUserMessage(prompt);
+              await waitFor(settled(sent.turnId));
+              assert.equal(seen.length, 1, `the tool was dispatched once: ${toolResult}`);
+              assert.equal(
+                seen[0].ackBeforeDispatch,
+                true,
+                'receipt was already stored when the tool dispatched',
+              );
+              assert.equal(seen[0].finalBeforeDispatch, false);
+              const rows = (
+                await db.pool.query(
+                  "SELECT stream_id,text FROM messages WHERE turn_id=$1 AND role='assistant' ORDER BY created_at,id",
+                  [sent.turnId],
+                )
+              ).rows;
+              assert.equal(rows[0].stream_id, `ack:${sent.turnId}`);
+              assert.equal(
+                rows.filter((row) => String(row.stream_id).startsWith('ack:')).length,
+                1,
+              );
+              assert.equal(await turnStatus(sent.turnId), failing ? 'failed' : 'succeeded');
+              if (failing) {
+                assert.ok(
+                  rows.length >= 2,
+                  'the failed turn shows a terminal message after the receipt',
+                );
+                assert.doesNotMatch(rows.at(-1)!.text, /^done:/);
+              } else assert.equal(rows.at(-1)!.text, `done: ${prompt}`);
+            }
+          } finally {
+            dependencies.runTurn = original;
+            dependencies.integration = originalIntegration;
+          }
+        },
+      );
       await t.test('retired confirmations stay out of later agent context', async () => {
         const activeId = (await thread.activeThread(db.pool)).id;
         const visibleId = randomUUID();
@@ -11264,14 +11789,33 @@ test(
                     type: 'tokens',
                     code: 'rate_limit_exceeded',
                     message:
-                      'Request too large for fixture-model on tokens per minute (TPM): Limit 6000, Requested 12000; please reduce your message size.',
+                      'Request too large for fixture-model on tokens per minute (TPM): Limit 6000, Requested 7000; please reduce your message size.',
                     detail: 'synthetic-private-provider-detail',
                   },
                 }),
-              reason: /Request too large.*Limit 6000, Requested 12000/,
+              reason: /Request too large.*Limit 6000, Requested 7000/,
               code: /rate_limit_exceeded/,
               advice:
                 /Shorten the conversation or choose a model with a higher tokens-per-minute limit\./,
+            },
+            {
+              prompt: 'model-oversized-itpm-fixture',
+              error:
+                prefix +
+                '413 ' +
+                JSON.stringify({
+                  error: {
+                    type: 'tokens',
+                    code: 'rate_limit_exceeded',
+                    message:
+                      'Request too large for fixture-model on input tokens per minute (ITPM): Limit 7000, Requested 15463; please reduce your message size.',
+                    detail: 'synthetic-private-provider-detail',
+                  },
+                }),
+              reason: /Request too large.*Limit 7000, Requested 15463/,
+              code: /rate_limit_exceeded/,
+              advice:
+                /limit of 7,000 tokens per minute .* needs 15,463.* even a short message exceeds it/,
             },
             {
               prompt: 'model-daily-quota-fixture',
@@ -11306,6 +11850,7 @@ test(
               prompt: 'model-plain-rate-limit-fixture',
               error: prefix + '429 Too Many Requests',
               reason: /429 Too Many Requests/,
+              advice: /The provider is rate-limiting requests right now\. Retry in a moment/,
             },
             {
               prompt: 'model-zero-quota-fixture',
@@ -12993,7 +13538,7 @@ test(
       CREATE TABLE discovered_connections(id uuid,owner_id text,reconnect_required boolean,replaced_at timestamptz,paths jsonb,created_at timestamptz DEFAULT now());
       CREATE TABLE model_connections(id uuid,owner_id text,provider text,method text,status text,managed boolean,models jsonb,request_failures jsonb,created_at timestamptz DEFAULT now());
       CREATE TABLE model_settings(owner_id text,selection jsonb,routes jsonb);
-      CREATE TABLE preferences(owner_id text,notification_rule text,time_zone text,quiet_start text,quiet_end text,quiet_hours_enabled boolean,locale text,hour_cycle text,rules text,speech_reply text,proactive_paused boolean,local_files_enabled boolean);
+      CREATE TABLE preferences(owner_id text,notification_rule text,time_zone text,quiet_start text,quiet_end text,quiet_hours_enabled boolean,locale text,hour_cycle text,rules text,speech_reply text,proactive_paused boolean,local_files_enabled boolean,terse_output boolean NOT NULL DEFAULT false);
       CREATE TABLE spending_limits(owner_id text,monthly_usd double precision,task_usd double precision,preparation_usd double precision);
       CREATE TABLE channel_settings(owner_id text,provider text,enabled boolean,summary jsonb,updated_at timestamptz DEFAULT now());
       CREATE TABLE integration_events(id text,owner_id text,slug text,state text,created_at timestamptz DEFAULT now());

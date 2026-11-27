@@ -20,6 +20,7 @@ const preferencesSchema = z
     quietEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
     proactivePaused: z.boolean(),
     localFilesEnabled: z.boolean(),
+    terseOutput: z.boolean(),
   })
   .strict();
 type Preferences = z.infer<typeof preferencesSchema>;
@@ -36,6 +37,7 @@ export const defaultPreferences: Preferences = {
   quietEnd: '08:00',
   proactivePaused: true,
   localFilesEnabled: false,
+  terseOutput: false,
 };
 type QuietHours = Pick<Preferences, 'quietHoursEnabled' | 'quietStart' | 'quietEnd' | 'timeZone'>;
 let lastClock: { timeZone: string; format: Intl.DateTimeFormat } | undefined;
@@ -77,7 +79,7 @@ function canonicalLocale(value: string) {
   return null;
 }
 const columns =
-  'speech_voice AS "speechVoice",speech_reply AS "speechReply",notification_rule AS "notificationRule",rules,time_zone AS "timeZone",locale,hour_cycle AS "hourCycle",quiet_hours_enabled AS "quietHoursEnabled",quiet_start AS "quietStart",quiet_end AS "quietEnd",proactive_paused AS "proactivePaused",local_files_enabled AS "localFilesEnabled"';
+  'speech_voice AS "speechVoice",speech_reply AS "speechReply",notification_rule AS "notificationRule",rules,time_zone AS "timeZone",locale,hour_cycle AS "hourCycle",quiet_hours_enabled AS "quietHoursEnabled",quiet_start AS "quietStart",quiet_end AS "quietEnd",proactive_paused AS "proactivePaused",local_files_enabled AS "localFilesEnabled",terse_output AS "terseOutput"';
 export function ianaTimeZone(value: string) {
   try {
     new Intl.DateTimeFormat('en', { timeZone: value });
@@ -121,14 +123,14 @@ export function createPreferencesStore(pool: Pool, ownerId: string, analytics?: 
       const capture = snapshotAnalytics(analytics);
       const save = async (connection: Pick<Pool, 'query'>) => {
         const result = await connection.query(
-          `INSERT INTO preferences(owner_id,notification_rule,time_zone,quiet_start,quiet_end,quiet_hours_enabled,locale,hour_cycle,rules,speech_voice,speech_reply,proactive_paused,local_files_enabled)
-        VALUES($1,COALESCE($2,$7),$3,COALESCE($4,$8),COALESCE($5,$9),COALESCE($6::boolean,$10::boolean),$11,COALESCE($12,$13),COALESCE($16,''),$17,COALESCE($18,'auto'),COALESCE($20::boolean,$21::boolean),COALESCE($24::boolean,false))
+          `INSERT INTO preferences(owner_id,notification_rule,time_zone,quiet_start,quiet_end,quiet_hours_enabled,locale,hour_cycle,rules,speech_voice,speech_reply,proactive_paused,local_files_enabled,terse_output)
+        VALUES($1,COALESCE($2,$7),$3,COALESCE($4,$8),COALESCE($5,$9),COALESCE($6::boolean,$10::boolean),$11,COALESCE($12,$13),COALESCE($16,''),$17,COALESCE($18,'auto'),COALESCE($20::boolean,$21::boolean),COALESCE($24::boolean,false),COALESCE($25::boolean,false))
         ON CONFLICT(owner_id) DO UPDATE SET notification_rule=COALESCE($2,preferences.notification_rule),rules=COALESCE($16,preferences.rules),
         time_zone=CASE WHEN $15 THEN $3 ELSE preferences.time_zone END,quiet_start=COALESCE($4,preferences.quiet_start),quiet_end=COALESCE($5,preferences.quiet_end),
         quiet_hours_enabled=COALESCE($6,preferences.quiet_hours_enabled),locale=CASE WHEN $14 THEN $11 ELSE preferences.locale END,
         hour_cycle=COALESCE($12,preferences.hour_cycle),speech_reply=COALESCE($18,preferences.speech_reply),
         speech_voice=CASE WHEN $19 THEN $17 ELSE preferences.speech_voice END,
-        proactive_paused=COALESCE($20,preferences.proactive_paused),local_files_enabled=COALESCE($24,preferences.local_files_enabled)
+        proactive_paused=COALESCE($20,preferences.proactive_paused),local_files_enabled=COALESCE($24,preferences.local_files_enabled),terse_output=COALESCE($25,preferences.terse_output)
         WHERE ($22::text IS NULL OR preferences.rules=$22) AND ($23::text IS NULL OR preferences.notification_rule=$23)
         RETURNING ${columns}`,
           [
@@ -156,6 +158,7 @@ export function createPreferencesStore(pool: Pool, ownerId: string, analytics?: 
             expectedRules ?? null,
             expectedNotificationRule ?? null,
             patch.localFilesEnabled ?? null,
+            patch.terseOutput ?? null,
           ],
         );
         if (!result.rows[0])
@@ -193,6 +196,7 @@ export function createPreferencesStore(pool: Pool, ownerId: string, analytics?: 
             quietEnd: 'quiet_end',
             proactivePaused: 'proactivity_paused',
             localFilesEnabled: 'local_files_access',
+            terseOutput: 'terse_output',
           }),
         );
         return after;

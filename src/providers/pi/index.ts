@@ -14,6 +14,7 @@ import {
   contentText,
   getCurrentTools,
   type AssistantMessage,
+  type Context,
   type ToolResultMessage,
 } from '@earendil-works/pi-ai';
 import { Agent as Connections, Dispatcher1Wrapper, buildConnector } from 'undici';
@@ -35,7 +36,26 @@ import {
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import { createPiModelRuntime } from './models.ts';
+import {
+  promptStructuralComplexity,
+  resolveSelectionEffort,
+} from '../../shared/model-defaults.ts';
 import { createTurnFallback, modelKey } from './fallback.ts';
+import {
+  estimateRequestTokens,
+  estimatedRequestTokens,
+  lastUserText,
+  knownOutputQuota,
+  noteObservedOutput,
+  outputBudgetWaitMs,
+  remainingOutputBudget,
+  knownRequestQuota,
+  learnOutputQuota,
+  learnRequestQuota,
+  noteObservedUsage,
+  quotaPreflightError,
+  retryableRateLimitWait,
+} from './request-quota.ts';
 import { modelContext } from './context.ts';
 import { createContextOutput, toolOutputReference } from './context-output.ts';
 import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './audio.ts';
@@ -62,6 +82,7 @@ import { createSandbox, workspaceOutputs } from './sandbox.ts';
 import { untrustedBlock } from '../../shared/untrusted.ts';
 import { draft2020Schema } from '../../shared/json-schema.ts';
 import { isPublicAddress, publicLookup } from '../agent-browser/network.ts';
+import { turnRetryPolicy } from './retry-policy.ts';
 
 function isFinalAnswer(signature: string | undefined) {
   if (!signature?.startsWith('{')) return false;
@@ -435,6 +456,164 @@ function earlierResults(started: number) {
   };
 }
 
+/**
+ * Duplicate reads within a session: when the replayed transcript already
+ * carries a byte-identical result for the same tool, later copies collapse
+ * to a pointer at the first one. Only exact matches collapse - any content
+ * change keeps both in full - and the rewrite happens at context build, so
+ * the originals stay intact in the session store. Registered after
+ * earlierResults so a fresh re-read of a pruned earlier result is never
+ * collapsed into the prune note.
+ */
+function duplicateResults(pi: ExtensionAPI) {
+  const dedupe = <T extends { role: string }>(messages: T[]) => {
+    const seen = new Map<string, number>();
+    return messages.map((message) => {
+      if (message.role !== 'toolResult') return message;
+      const result = message as unknown as ToolResultMessage;
+      const text = contentText(result.content);
+      // Placeholder rewrites (the earlierResults note or this pointer) are
+      // not reads: collapsing them would chain pointers at placeholders and
+      // break the prune's stable-prefix property.
+      if (text.includes('Never repeat an action only to see its result.')) return message;
+      const key = `${result.toolName}\n${text}`;
+      const earlier = seen.get(key);
+      if (earlier === undefined) {
+        seen.set(key, 1);
+        return message;
+      }
+      seen.set(key, earlier + 1);
+      return {
+        ...message,
+        content: [
+          {
+            type: 'text' as const,
+            text: `This ${result.toolName} result is identical to the earlier one in this conversation (${text.length.toLocaleString('en-US')} characters) and is not repeated. Never repeat an action only to see its result.`,
+          },
+        ],
+      };
+    });
+  };
+  pi.on('context', ({ messages }) => ({ messages: dedupe(messages) }));
+  pi.on('session_before_compact', ({ preparation }) => {
+    preparation.messagesToSummarize = dedupe(preparation.messagesToSummarize);
+    preparation.turnPrefixMessages = dedupe(preparation.turnPrefixMessages);
+  });
+}
+
+/**
+ * Earlier owner envelopes (the owner's retrieval-first design): every owner
+ * request arrives wrapped in a per-turn envelope - local-time header, request
+ * JSON, and frozen recentConversation / memoryForThisRequest snapshots.
+ * Replayed verbatim every turn, those frozen snapshots compound (measured
+ * ~60% of late-turn requests, ~1,800 est. tokens of growth per message). Only
+ * the current message and the last exchange stay verbatim; each completed
+ * turn's envelope collapses to a one-line step marker with a retrieval
+ * pointer. Originals stay in the session store and in the message database
+ * (history_search reads them), and owner authority is validated against
+ * message rows, never against replayed context, so this rewrite changes
+ * context size only. The rewrite is deterministic per envelope, so replayed
+ * prefixes stay byte-identical across later requests.
+ */
+const envelopeInstruction = /"currentInstruction":"((?:[^"\\]|\\.)*)"/;
+
+// Bounded step markers: at most this many one-line markers are kept for
+// completed turns; older ones collapse into a single fixed line (no count -
+// the owner chose cache stability over the running total), so per-message
+// growth from markers goes to zero and the marker region stays byte-stable.
+const keptStepMarkers = 5;
+
+function earlierEnvelopes(pi: ExtensionAPI) {
+  const prune = <T extends { role: string }>(messages: T[]) => {
+    const envelopes = messages.flatMap((message, index) =>
+      message.role === 'user' &&
+      envelopeInstruction.test(
+        contentText((message as unknown as { content: Parameters<typeof contentText>[0] }).content),
+      )
+        ? [index]
+        : [],
+    );
+    // Current message plus the last exchange stay; the last exchange's owner
+    // envelope is reduced to the owner's bare words plus the time header,
+    // dropping the per-request wrapper (retrieval rules, frozen snapshot,
+    // request metadata, memory evidence) which only the current envelope needs.
+    const previous = envelopes.length >= 2 ? envelopes[envelopes.length - 2]! : -1;
+    const prunable = envelopes.length > 2 ? envelopes.slice(0, -2) : [];
+    if (previous < 0) return messages;
+    const collapsed = Math.max(prunable.length - keptStepMarkers, 0);
+    const collapseAt = collapsed >= 1 ? prunable[0]! : -1;
+    const dropped = new Set(collapsed >= 1 ? prunable.slice(0, collapsed) : []);
+    const marked = new Set(collapsed >= 1 ? prunable.slice(collapsed) : prunable);
+    // Completed turns fold into their step line entirely: the old assistant
+    // replies and tool calls/results before the last exchange leave the
+    // context too (originals stay searchable in the store). Only the last
+    // exchange and the current message keep their assistant/tool messages.
+    const boundary = previous;
+    return messages.flatMap((message, index) => {
+      if (
+        index < boundary &&
+        (message.role === 'assistant' || message.role === 'toolResult' || message.role === 'tool')
+      )
+        return [];
+      if (index === boundary) {
+        const text = contentText(
+          (message as unknown as { content: Parameters<typeof contentText>[0] }).content,
+        );
+        const cut = text.indexOf('Request data (JSON):');
+        const header = cut >= 0 ? text.slice(0, cut) : '';
+        const raw = text.match(envelopeInstruction)?.[1] ?? '';
+        let instruction = raw;
+        try {
+          instruction = JSON.parse(`"${raw}"`) as string;
+        } catch {
+          // keep the raw capture when it is not valid JSON string content
+        }
+        return [
+          {
+            ...message,
+            content: [{ type: 'text' as const, text: `${header}${instruction}` }],
+          },
+        ];
+      }
+      if (index === collapseAt)
+        return [
+          {
+            ...message,
+            content: [
+              {
+                type: 'text' as const,
+                text: 'Earlier completed steps - saved; search to read them.',
+              },
+            ],
+          },
+        ];
+      if (dropped.has(index)) return [];
+      if (!marked.has(index)) return [message];
+      const text = contentText(
+        (message as unknown as { content: Parameters<typeof contentText>[0] }).content,
+      );
+      const instruction = text.match(envelopeInstruction)?.[1] ?? '';
+      const heading = instruction.length > 100 ? `${instruction.slice(0, 100)}…` : instruction;
+      return [
+        {
+          ...message,
+          content: [
+            {
+              type: 'text' as const,
+              text: `Earlier owner request (completed): "${heading}" - the full message, its metadata and its memory evidence stay saved; read them with history_search if this turn needs them.`,
+            },
+          ],
+        },
+      ];
+    });
+  };
+  pi.on('context', ({ messages }) => ({ messages: prune(messages) }));
+  pi.on('session_before_compact', ({ preparation }) => {
+    preparation.messagesToSummarize = prune(preparation.messagesToSummarize);
+    preparation.turnPrefixMessages = prune(preparation.turnPrefixMessages);
+  });
+}
+
 function completeAssistantMessages(pi: ExtensionAPI) {
   pi.on('message_end', ({ message }) => {
     if (message.role !== 'assistant') return;
@@ -459,6 +638,70 @@ function planBilled(event: AgentEvent): AgentEvent {
           },
         }
       : event;
+}
+
+/**
+ * Zero-definition protocol (NOD_TOOL_LOADOUT=zero, local review): the model's
+ * ENTIRE reply must be one JSON object {"tool":"NAME","input":{...}} (a
+ * ```json fence is tolerated). Anything else is a normal reply, not a
+ * command - strict on purpose, so prose is never mistaken for a tool call.
+ */
+export function zeroToolCommand(
+  reply: string,
+): { tool: string; input?: Record<string, unknown> } | undefined {
+  const unfenced = reply
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim();
+  if (!unfenced.startsWith('{') || !unfenced.endsWith('}')) return undefined;
+  try {
+    const parsed = JSON.parse(unfenced) as { tool?: unknown; input?: unknown };
+    if (typeof parsed?.tool !== 'string' || !parsed.tool) return undefined;
+    if (
+      parsed.input !== undefined &&
+      (typeof parsed.input !== 'object' || parsed.input === null || Array.isArray(parsed.input))
+    )
+      return undefined;
+    return { tool: parsed.tool, input: parsed.input as Record<string, unknown> | undefined };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * On-demand discovery for the zero-definition protocol: rank the LOCAL
+ * deferred-tool catalog by the query and return at most five name +
+ * description + schema entries. This is the same definition data
+ * nod_tool_search searches; only what was asked for enters the conversation.
+ */
+export function zeroToolCatalog(tools: ToolDefinition[], query: string) {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const ranked = tools
+    .filter((tool) => tool.exposure === 'deferred')
+    .map((tool) => {
+      // Names + short purposes + argument NAMES only: full schemas (types,
+      // constraints, descriptions) stay local. A call with wrong arguments
+      // gets a compact validation error to correct against, so definitions
+      // never ride any request.
+      const parameters = tool.parameters as
+        | { properties?: Record<string, unknown>; required?: string[] }
+        | undefined;
+      const entry = {
+        name: tool.name,
+        description: (tool.description ?? '').slice(0, 160),
+        arguments: Object.keys(parameters?.properties ?? {}).map((key) =>
+          parameters?.required?.includes(key) ? key : `${key}?`,
+        ),
+      };
+      const haystack = `${tool.name} ${tool.description ?? ''}`.toLowerCase();
+      const score = words.length ? words.filter((word) => haystack.includes(word)).length : 1;
+      return { entry, score };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+  return { tools: ranked.map((item) => item.entry) };
 }
 
 export function createPiAgent(options: {
@@ -609,13 +852,46 @@ export function createPiAgent(options: {
         signal?: AbortSignal,
         nested = false,
       ) => {
-        const result = await run();
+        let result;
+        try {
+          result = await run();
+        } catch (error) {
+          // Abort and stop must keep propagating untouched; any other thrown
+          // tool error becomes an error tool-result so the model sees it -
+          // and it must be bounded like any other result, or a huge error
+          // message lands raw in the next request.
+          const message = error instanceof Error ? error.message : String(error);
+          if (
+            nested ||
+            signal?.aborted ||
+            (error instanceof Error && error.name === 'AbortError') ||
+            /turn was stopped/i.test(message)
+          )
+            throw error;
+          result = {
+            content: [{ type: 'text' as const, text: message }],
+            isError: true,
+          } as Awaited<ReturnType<ToolDefinition['execute']>>;
+        }
         if (nested) return result;
         const text = result.content
           .flatMap((part) => (part.type === 'text' ? [part.text] : []))
           .join('\n');
+        // Context-window budgets alone are too lax on a per-minute-limited
+        // connection: the whole conversation is resent with every request,
+        // and one unbounded memory read rejected a live follow-up at 11,530
+        // requested tokens on a 7,000 ITPM connection. When a limit is
+        // learned, a single tool result may use at most a quarter of it.
+        const quotaKey = turnModels.get(input.turnId) ?? (access ? modelKey(access) : undefined);
+        const learned = quotaKey ? knownRequestQuota(quotaKey) : undefined;
+        const quotaTokenCap = learned ? Math.max(256, Math.floor(learned.limit / 4)) : Infinity;
+        const maxBytes = Math.min(
+          budget.toolOutput.maxBytes / toolCallCount,
+          quotaTokenCap * 2,
+        );
+        const maxTokens = Math.min(budget.toolOutput.maxTokens / toolCallCount, quotaTokenCap);
         if (
-          Buffer.byteLength(text) <= budget.toolOutput.maxBytes / toolCallCount &&
+          Buffer.byteLength(text) <= maxBytes &&
           estimateTokens({
             role: 'toolResult',
             toolCallId: '',
@@ -623,8 +899,7 @@ export function createPiAgent(options: {
             content: result.content,
             isError: result.isError ?? false,
             timestamp: 0,
-          }) <=
-            budget.toolOutput.maxTokens / toolCallCount
+          }) <= maxTokens
         )
           return result;
         const saved = await output.save(
@@ -725,8 +1000,37 @@ export function createPiAgent(options: {
           null,
           priorTokens,
         );
-      if (input.newRequest && cold) startRequest(manager);
+      // Mark every new owner request, not only cold-cache restarts: the
+      // earlierResults prune keys off this marker to age previous turns'
+      // oversize tool results out of the replayed transcript (originals stay
+      // in the session store and re-read through the source tools).
+      if (input.newRequest) startRequest(manager);
       const sandboxTools = input.restricted ? [] : createSandbox(input.workspace, input.timeZone);
+      // Local-review minimal loadout (NOD_TOOL_LOADOUT=minimal): only
+      // send_message, ask_user, nod_tool and nod_tool_search are declared;
+      // every other capability (sandbox tools included) stays reachable
+      // through the nod_tool gateway, which dispatches to the same mapped
+      // definitions with their validation and execution paths unchanged.
+      // Deferral is also the retrieval-first conversation default
+      // (input.deferTools, measured -16% session bytes on top of the
+      // retrieval-first prompt): only send_message, ask_user, nod_tool and
+      // nod_tool_search are declared; the gateway dispatches to the same
+      // mapped definitions, so validation, approvals and output bounding
+      // are unchanged.
+      const minimalLoadout =
+        (process.env.NOD_TOOL_LOADOUT === 'minimal' || input.deferTools) &&
+        !input.restricted &&
+        !budget.compact;
+      // Local-review ZERO-DEFINITION loadout (NOD_TOOL_LOADOUT=zero): no tool
+      // schemas are declared at all. The system prompt carries only a compact
+      // command protocol; the turn loop in prompt() parses one-JSON-object
+      // replies, executes them locally through the same nod_tool gateway
+      // (validation, approvals and output bounding unchanged), and feeds the
+      // bounded result back. This measures the floor of the tools-isolation
+      // architecture: definitions never ride the request unless retrieved.
+      const zeroLoadout =
+        process.env.NOD_TOOL_LOADOUT === 'zero' && !input.restricted && !budget.compact;
+      const sandboxNames = new Set(sandboxTools.map((tool) => tool.name));
       const compactTools = [
         ...sandboxTools.map((tool) => tool.name),
         'nod_tool_search',
@@ -737,6 +1041,15 @@ export function createPiAgent(options: {
       const tools: ToolDefinition[] = [
         ...sandboxTools.map((definition): ToolDefinition => ({
           ...definition,
+          ...(minimalLoadout
+            ? {
+                exposure: 'deferred' as const,
+                namespace: {
+                  name: 'workspace',
+                  description: 'Workspace file and command tools.',
+                },
+              }
+            : {}),
           execute: async (id, params, signal, onUpdate, context) => {
             params = structuredClone(params);
             const result = await input.runTool(
@@ -781,7 +1094,11 @@ export function createPiAgent(options: {
             : tool.deferred
               ? toolSchema(tool.parameters)
               : tool.parameters) as ToolDefinition['parameters'],
-          ...((!input.restricted && !tool.eager) || tool.deferred || budget.compact
+          ...((!input.restricted && !tool.eager) ||
+          tool.deferred ||
+          budget.compact ||
+          zeroLoadout ||
+          (minimalLoadout && !['send_message', 'ask_user'].includes(tool.name))
             ? {
                 exposure: 'deferred' as const,
                 namespace: tool.deferred
@@ -818,6 +1135,73 @@ export function createPiAgent(options: {
           },
         })),
       ];
+      // Compact gateway: one small always-on schema that calls any deferred
+      // tool by name, so a model that already knows the tool (from an earlier
+      // search or earlier in the conversation) skips the search round trip,
+      // and a minimal tool set can keep full capability without declaring
+      // every schema. The dispatched call runs through the same mapped
+      // definition as a direct call, so the target keeps its companions,
+      // bounded output, validation, approvals and execution path.
+      tools.push({
+        name: 'nod_tool',
+        label: 'nod tool',
+        description:
+          'Call one load-on-demand Nod tool by name with its arguments. Use nod_tool_search first to discover a tool and read its schema unless you already know them.',
+        parameters: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Name of the load-on-demand tool to call.' },
+            args: { type: 'object', description: 'Arguments for that tool.' },
+          },
+          required: ['name', 'args'],
+          additionalProperties: false,
+        } as ToolDefinition['parameters'],
+        exposure: zeroLoadout ? ('deferred' as const) : ('direct' as const),
+        executionMode: 'sequential' as const,
+        execute: async (id, args, signal, onUpdate, context) => {
+          const { name, args: forwarded } = (args ?? {}) as {
+            name?: string;
+            args?: Record<string, unknown>;
+          };
+          const mapped = name === 'browser' ? 'nod_browser' : name;
+          const target = tools.find((tool) => tool.name === mapped);
+          if (!target || target.exposure !== 'deferred')
+            throw new Error(
+              `nod_tool calls load-on-demand tools by name; "${String(name)}" is not one. Use nod_tool_search to find loadable tools.`,
+            );
+          // The loop validates only nod_tool's own arguments, so a gateway
+          // call would reach the target with unchecked args (an empty {}
+          // crashed bash with 'Cannot read properties of undefined'). Nod
+          // app tools validate inside execute (bind) exactly as on a direct
+          // call; sandbox tools rely on the loop's schema validation, which
+          // the gateway bypasses - restore it for them with the same
+          // corrective error shape a direct call gets.
+          const forwardedArgs = (forwarded ?? {}) as Record<string, unknown>;
+          if (sandboxNames.has(target.name)) {
+            const checked = Compile(toolSchema(target.parameters));
+            if (!checked.Check(structuredClone(forwardedArgs))) {
+              const errors = checked
+                .Errors(forwardedArgs)
+                .slice(0, 5)
+                .map((error) => `  - ${error.instancePath || '/'}: ${error.message}`)
+                .join('\n');
+              throw new Error(
+                `Invalid arguments for tool "${target.name}":\n${errors}\nCorrect the arguments and call the tool again.`,
+              );
+            }
+          }
+          // Gateway-dispatched tools must pass the same output bounding as
+          // direct calls: an unbounded result (a full memory read is ~7k
+          // tokens on its own) re-inflates the very next request past the
+          // connection's limit - measured live as a 413 at 11,530 requested
+          // on a 7,000 ITPM connection.
+          return boundedOutput(
+            target.name,
+            () => target.execute(id, forwardedArgs as never, signal, onUpdate, context),
+            signal,
+          );
+        },
+      });
       const guided = new Set<string>();
       const deferred =
         !input.restricted || budget.compact || input.tools.some((tool) => tool.deferred);
@@ -826,7 +1210,11 @@ export function createPiAgent(options: {
         transport: 'sse',
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
-        retry: { baseDelayMs: 4000, ...(backups.length ? { maxRetries: 1 } : {}) },
+        // Bounded retry for transient provider failures (e.g. 429 rate
+        // limits): one retry with a jittered base delay, whether or not
+        // backup models are configured, so a shared-pool throttle doesn't
+        // fail the turn immediately.
+        retry: turnRetryPolicy(),
       });
       const extensionLoader = new DefaultResourceLoader({
         cwd: input.workspace.path,
@@ -856,14 +1244,19 @@ export function createPiAgent(options: {
                             )
                             .map((entry) => entry.name),
                         }),
-                        description: tool.description.replaceAll('tool_search', 'nod_tool_search'),
+                        description: tool.description
+                          .replaceAll('tool_search', 'nod_tool_search')
+                          .replace('Defaults to 8.', 'Defaults to 4.'),
                         execute: async (id, params, signal, update, context) => {
                           if (budget.compact) pi.setActiveTools(compactTools);
                           const result = await tool.execute(
                             id,
                             budget.compact
                               ? ({ ...(params as object), limit: 1 } as typeof params)
-                              : params,
+                              : // Keep each load small: every loaded schema is part of later
+                                // requests, and a search usually wants one or two tools. The
+                                // model can still pass a higher limit explicitly.
+                                ({ limit: 4, ...(params as object) } as typeof params),
                             signal,
                             update,
                             context,
@@ -894,6 +1287,8 @@ export function createPiAgent(options: {
               ]
             : []),
           earlierResults(requestStart(manager)),
+          duplicateResults,
+          earlierEnvelopes,
           recentImages,
           draft2020Tools,
           audioContext(manager, readsNativeAudio(model) && Boolean(input.readAudio)),
@@ -1106,6 +1501,10 @@ export function createPiAgent(options: {
           'Use nod_browser for browser calls. In older procedures, browser means this tool.',
         );
       if (deferred) guidelines.push('Use nod_tool_search to load deferred tools.');
+      if (zeroLoadout)
+        guidelines.push(
+          'No tools are declared in this chat. To use one, make your ENTIRE reply exactly one JSON object and nothing else: {"tool":"NAME","input":{...}}. Discover tool names and purposes with {"tool":"nod_tool_search","input":{"query":"what you need"}} - it returns no schemas. If a call fails, the error says which argument to fix: correct it and send the command again. Never claim you saved, changed or did something without an actual tool command and its result. Tool results arrive as user messages; then answer normally or send another command.',
+        );
       const systemPrompt = guidelines.length
         ? `${input.systemPrompt}\n\nTool guidelines:\n${guidelines.map((rule) => `- ${rule}`).join('\n')}`
         : input.systemPrompt;
@@ -1146,6 +1545,22 @@ export function createPiAgent(options: {
             .map(([name]) => name),
         ),
       ];
+      // Zero-definition mode declares nothing: discovery and calls run
+      // through the protocol loop below instead of provider-visible schemas.
+      if (zeroLoadout) directTools.length = 0;
+      // Turn-scoped loadout: the always-on set is everything with direct
+      // exposure. Tools loaded on demand (nod_tool_search, companions) stay
+      // active for the turn that loaded them and are evicted at the next
+      // owner-turn boundary (see prompt below), so earlier discoveries do not
+      // inflate every later request in a long conversation.
+      const exposureOf = new Map<string, ToolDefinition['exposure']>([
+        ...tools.map((tool) => [tool.name, tool.exposure] as const),
+        ...extensions.extensions.flatMap((extension) =>
+          [...extension.tools.entries()].map(
+            ([name, tool]) => [name, tool.definition.exposure] as const,
+          ),
+        ),
+      ]);
       const resumed = !restart && manager.buildSessionContext().messages.length > 0;
       const { session } = await (options.createSession ?? createAgentSession)({
         cwd: input.workspace.path,
@@ -1188,9 +1603,134 @@ export function createPiAgent(options: {
 
       const stream = session.agent.streamFunction;
       session.agent.streamFunction = async (target, context, options) => {
-        const response = await stream(target, context, options);
-        if (compaction) compaction.requests.push(await response.result());
-        return response;
+        // Single-connection turns have no fallback to preflight per candidate,
+        // so refuse doomed requests and learn provider-reported limits here.
+        const quotaKey = turnModels.get(input.turnId) ?? (access ? modelKey(access) : undefined);
+        // Auto effort resolves HERE, per request, where the turn's actual
+        // payload and the learned quotas are both visible: simple turns and
+        // tight connections stay light, substantial tasks get the provider
+        // default - without any extra classification call. Manual levels are
+        // never touched (access.effortAuto is only set for stored 'auto').
+        if (!fallback && quotaKey && access?.effortAuto) {
+          session.setThinkingLevel(
+            resolveSelectionEffort(access.provider, access.definition.choice, 'auto', {
+              estimatedInputTokens: estimatedRequestTokens(quotaKey, context),
+              structuralComplexity: promptStructuralComplexity(lastUserText(context)),
+              inputQuotaPerMinute: knownRequestQuota(quotaKey)?.limit,
+              outputQuotaPerMinute: knownOutputQuota(quotaKey)?.limit,
+            }),
+          );
+        }
+        if (!fallback && quotaKey) {
+          const refused = quotaPreflightError(quotaKey, context);
+          if (refused) throw refused;
+        }
+        // Never ask for more output than the connection's learned per-minute
+        // output limit has left in this minute; the provider rejects
+        // over-budget requests outright (measured live: OTPM Limit 1000,
+        // Requested 1232). When too little is left to be useful, wait out
+        // the window instead of knowingly overshooting the quota.
+        if (!fallback && quotaKey) {
+          const outputWait = outputBudgetWaitMs(quotaKey);
+          if (outputWait > 0) {
+            input.onEvent({
+              type: 'retry',
+              model: target.id,
+              attempt: 1,
+              attempts: 2,
+              detail: 'waiting for the per-minute output limit to reset',
+            });
+            // Abortable: poll the turn's stop flag while the window resets so
+            // a user cancel interrupts the wait instead of hanging 60s.
+            const deadline = Date.now() + outputWait;
+            while (Date.now() < deadline) {
+              if (input.shouldStop?.()) throw new Error('The turn was stopped.');
+              await new Promise((resolve) => setTimeout(resolve, Math.min(250, deadline - Date.now())));
+            }
+          }
+        }
+        const outputCap = quotaKey ? remainingOutputBudget(quotaKey) : undefined;
+        const requestOptions =
+          outputCap !== undefined && (options?.maxTokens === undefined || options.maxTokens > outputCap)
+            ? { ...options, maxTokens: outputCap }
+            : options;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          let response;
+          try {
+            response = await stream(target, context, requestOptions);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!fallback && quotaKey) {
+              // A 413 carries the provider's exact Requested count: use it to
+              // correct the estimate that let the request through, or the
+              // same oversize request would loop.
+              const rejected = learnRequestQuota(quotaKey, message);
+              if (rejected)
+                noteObservedUsage(quotaKey, estimateRequestTokens(context), rejected.requested);
+              learnOutputQuota(quotaKey, message);
+            }
+            // Per-minute pacing (429) is retryable at the provider's own hint;
+            // the session retry misclassifies these as billing limits, and
+            // per-request size rejections (413) carry no hint and never match.
+            // Retrying resends this request only; already-executed tool
+            // results stay in context and are not replayed.
+            const wait = retryableRateLimitWait(message);
+            if (wait === undefined || attempt === 1) throw error;
+            input.onEvent({
+              type: 'retry',
+              model: target.id,
+              attempt: attempt + 1,
+              attempts: 2,
+              detail: `rate limited, retrying in about ${Math.ceil(wait / 1000)}s`,
+            });
+            // Same abortable pattern as the output-window wait: a user
+            // cancel interrupts the pacing wait instead of hanging.
+            {
+              const deadline = Date.now() + wait;
+              while (Date.now() < deadline) {
+                if (input.shouldStop?.()) throw new Error('The turn was stopped.');
+                await new Promise((resolve) => setTimeout(resolve, Math.min(250, deadline - Date.now())));
+              }
+            }
+            continue;
+          }
+          const result = await response.result();
+          if (!fallback && quotaKey) {
+            const rejected = learnRequestQuota(quotaKey, result.errorMessage);
+            if (rejected)
+              noteObservedUsage(quotaKey, estimateRequestTokens(context), rejected.requested);
+            learnOutputQuota(quotaKey, result.errorMessage);
+            // The provider's own count corrects our conservative estimate
+            // for this connection, so a learned limit stops refusing
+            // requests that actually fit (live: est ~7.2k vs real 4,011).
+            const usage = result.usage as { input?: number; output?: number } | undefined;
+            if (typeof usage?.input === 'number' && usage.input > 0 && !result.errorMessage)
+              noteObservedUsage(quotaKey, estimateRequestTokens(context), usage.input);
+            if (typeof usage?.output === 'number' && usage.output > 0)
+              noteObservedOutput(quotaKey, usage.output);
+          }
+          const wait = retryableRateLimitWait(result.errorMessage);
+          if (wait !== undefined && attempt < 1) {
+            input.onEvent({
+              type: 'retry',
+              model: target.id,
+              attempt: attempt + 1,
+              attempts: 2,
+              detail: `rate limited, retrying in about ${Math.ceil(wait / 1000)}s`,
+            });
+            {
+              const deadline = Date.now() + wait;
+              while (Date.now() < deadline) {
+                if (input.shouldStop?.()) throw new Error('The turn was stopped.');
+                await new Promise((resolve) => setTimeout(resolve, Math.min(250, deadline - Date.now())));
+              }
+            }
+            continue;
+          }
+          if (compaction) compaction.requests.push(result);
+          return response;
+        }
+        throw new Error('unreachable');
       };
 
       const finishTurn = session.agent.finishTurn;
@@ -1427,6 +1967,16 @@ export function createPiAgent(options: {
         compactContext: budget.compact,
         async prompt(text, images, audio, stablePrefixes) {
           cached.stable = stablePrefixes;
+          // Evict on-demand tools at the owner-turn boundary: no tool call is
+          // pending here, and mid-turn sequences (search, call, answer) keep
+          // everything they loaded until the turn ends.
+          // Tools are just-in-time in every loadout: all non-eager tools are
+          // deferred behind the nod_tool gateway catalog and activate on use,
+          // so a light turn needs no separate restriction here.
+          if (!budget.compact)
+            session.setActiveToolsByName(
+              directTools.filter((name) => exposureOf.get(name) !== 'deferred'),
+            );
           const owner = input.ownerContext;
           const copy = manager.buildSessionContext().messages.findLast(isOwnerContext);
           if (owner && (copy as { content?: unknown } | undefined)?.content !== owner)
@@ -1439,7 +1989,61 @@ export function createPiAgent(options: {
               await session.sendCustomMessage(audioMessage(text, images, audio), {
                 triggerTurn: true,
               });
-            else await session.prompt(text, { images, expandPromptTemplates: false });
+            else {
+              await session.prompt(text, { images, expandPromptTemplates: false });
+              if (zeroLoadout) {
+                const gateway = tools.find((tool) => tool.name === 'nod_tool');
+                for (let round = 0; round < 4 && !disposed && gateway; round++) {
+                  if (input.shouldStop?.()) break;
+                  const messages = manager.buildSessionContext().messages;
+                  const last = messages.findLast(
+                    (message) => (message as { role?: string }).role === 'assistant',
+                  );
+                  const lastContent = (last as { content?: unknown } | undefined)?.content;
+                  if (process.env.NOD_BENCH_DEBUG)
+                    console.error(
+                      'zero-loop last message:',
+                      JSON.stringify(last)?.slice(0, 400),
+                    );
+                  const reply =
+                    typeof lastContent === 'string' || Array.isArray(lastContent)
+                      ? contentText(lastContent as never).trim()
+                      : '';
+                  const command = zeroToolCommand(reply);
+                  if (process.env.NOD_BENCH_DEBUG)
+                    console.error('zero-loop reply:', reply.slice(0, 200));
+                  if (!command) break;
+                  let result: unknown;
+                  try {
+                    result =
+                      command.tool === 'nod_tool_search'
+                        ? zeroToolCatalog(tools, String(command.input?.query ?? ''))
+                        : await gateway.execute(
+                            `zero-${round}`,
+                            { name: command.tool, args: command.input ?? {} } as never,
+                            new AbortController().signal,
+                            undefined as never,
+                            undefined as never,
+                          );
+                  } catch (error) {
+                    result = { error: error instanceof Error ? error.message : String(error) };
+                  }
+                  const resultContent = (result as { content?: unknown } | undefined)?.content;
+                  const serialized =
+                    typeof resultContent === 'string' || Array.isArray(resultContent)
+                      ? contentText(resultContent as never)
+                      : (JSON.stringify(result) ?? 'null');
+                  if (process.env.NOD_BENCH_DEBUG)
+                    console.error('zero-loop result:', serialized.slice(0, 200));
+                  // Bounded like any tool result: an unbounded echo would
+                  // re-inflate the very next request past the limit.
+                  await session.prompt(
+                    `Tool result (${command.tool}):\n${serialized.slice(0, 4000)}`,
+                    { expandPromptTemplates: false },
+                  );
+                }
+              }
+            }
           } finally {
             settings.applyOverrides({ compaction: budget.compaction });
             if (dropFailedInput(manager)) session.refreshContext();

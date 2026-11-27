@@ -1704,7 +1704,7 @@ test(
       await admin.end();
     });
     await pool.query(`CREATE TABLE threads(id uuid PRIMARY KEY,owner_id text,archived_at timestamptz);
-      CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text,thread_id uuid,turn_id uuid,role text,text text,hidden_at timestamptz,created_at timestamptz);
+      CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text,thread_id uuid,turn_id uuid,role text,text text,stream_id text,hidden_at timestamptz,created_at timestamptz);
       CREATE TABLE turns(id uuid PRIMARY KEY,owner_id text,thread_id uuid,message_id uuid,prompt text,status text,source text,channel text,withdrawn boolean NOT NULL DEFAULT false,created_at timestamptz);
       CREATE TABLE preferences(owner_id text,time_zone text);`);
     const active = randomUUID(),
@@ -1759,6 +1759,16 @@ test(
       "INSERT INTO messages(id,owner_id,thread_id,role,text,hidden_at,created_at) VALUES($1,$2,$3,'user','Maple fair cedar elm.',now(),$4)",
       [hiddenId, 'owner-a', active, new Date(Date.UTC(2026, 0, 1, 0, 19, 30))],
     );
+    // An execution-ack receipt repeats real words but is chat UI, never a
+    // reply: it must stay out of matches, context windows and counts.
+    const ack = {
+      id: randomUUID(),
+      at: new Date(Date.UTC(2026, 0, 1, 0, 20, 30)),
+    };
+    await pool.query(
+      "INSERT INTO messages(id,owner_id,thread_id,role,text,stream_id,created_at) VALUES($1,$2,$3,'assistant','Maple fair cedar elm.',$4,$5)",
+      [ack.id, 'owner-a', active, `ack:${randomUUID()}`, ack.at],
+    );
     const search = createHistorySearch({ pool, ownerId: 'owner-a' });
     for (const order of ['relevance', 'newest']) {
       const found: string[] = [];
@@ -1770,6 +1780,7 @@ test(
           ...page.messages.filter((message) => message.match).map((message) => message.id),
         );
         assert.equal(page.complete, !page.nextCursor);
+        assert.ok(page.messages.every((message) => message.id !== ack.id));
         if (!page.nextCursor) break;
         cursor = page.nextCursor;
       }
@@ -1782,6 +1793,9 @@ test(
     await assert.rejects(search({ around: other.id }), /unavailable/);
     await assert.rejects(search({ around: old.id }), /unavailable/);
     await assert.rejects(search({ around: hiddenId }), /unavailable/);
+    const ackWindow = await search({ around: records[20].id });
+    assert.ok(ackWindow.messages.every((message) => message.id !== ack.id));
+    assert.ok(ackWindow.messages.length > 0);
     const datePage = await search({ from: '2026-01-01', to: '2026-01-01' });
     assert.equal(datePage.totalMatches, 45);
     const scoped = Array.from({ length: 10 }, (_, index) => ({
@@ -2325,4 +2339,53 @@ test('updates email keeps fixed answers scoped to each submission across route i
   };
   assert.equal((await signup(personalBusiness)).statusCode, 200);
   assert.deepEqual(sent[2], personalBusiness);
+});
+
+test('memory_read windows long notes by bytes with exact continuation and a bounded envelope', async () => {
+  const { modelContext } = await import('../src/providers/pi/context.ts');
+  // The 6,000 B envelope fits each mode's per-tool output budget even when
+  // the turn splits it across two tool calls.
+  for (const contextWindow of [32_768, 131_072]) {
+    const budget = modelContext({
+      provider: 'mock',
+      id: 'mock-model',
+      contextWindow,
+      maxTokens: 8192,
+    });
+    assert.ok(budget.toolOutput.maxBytes / 2 >= 6000, `window ${contextWindow}`);
+  }
+  const memory = createMemoryService({
+    pool: { query: async () => ({ rows: [] }) } as unknown as pg.Pool,
+    ownerId: 'windowed-read-owner',
+    store: memoryObjectStore(),
+  });
+  // Arabic is two bytes per char: 3,534 chars is ~7 KB, past the byte budget
+  // while under the 4,000-char note schema limit.
+  const text = `القرار النهائي: الحجز في الهيلتون. ${'س'.repeat(3500)}`;
+  const path = await memory.add({ area: 'about', text });
+  type ReadPage = {
+    text: string;
+    shortened?: boolean;
+    textLength?: number;
+    nextOffset?: number;
+  };
+  const windows: string[] = [];
+  let offset: number | undefined;
+  for (let page = 0; ; page++) {
+    const result = (await memory.read({
+      path,
+      ...(offset === undefined ? {} : { offset }),
+    })) as ReadPage;
+    const envelope = Buffer.byteLength(JSON.stringify(result));
+    assert.ok(envelope <= 6000, `page ${page} envelope is ${envelope} B`);
+    assert.equal(result.textLength, text.length);
+    assert.equal(result.shortened, result.nextOffset !== undefined);
+    windows.push(result.text);
+    if (result.nextOffset === undefined) break;
+    offset = result.nextOffset;
+    assert.ok(page < 10, 'window walk did not terminate');
+  }
+  assert.ok(windows.length >= 2, 'a ~7 KB note must page');
+  assert.equal(windows.join(''), text);
+  assert.match(windows.join(''), /الهيلتون/);
 });

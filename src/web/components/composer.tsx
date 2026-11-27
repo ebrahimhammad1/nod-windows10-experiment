@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type ReactNode,
 } from 'react';
 import { EditorContent, useEditor } from '@tiptap/react';
 import type { JSONContent } from '@tiptap/core';
@@ -76,6 +77,7 @@ export type ComposerSendResult =
 
 interface ComposerProps {
   active?: boolean;
+  accessory?: ReactNode;
   draftKey?: string;
   privateReply?: boolean;
   restoreReply?(reply: Message['replyTo']): void;
@@ -100,6 +102,7 @@ interface ComposerProps {
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
   {
     active = true,
+    accessory,
     ready,
     busy = false,
     text,
@@ -1209,6 +1212,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   : microphoneLabel}
               </span>
             </MicrophonePicker>
+            {accessory}
             {showStop && (
               <span className="stop-slot">
                 <Button

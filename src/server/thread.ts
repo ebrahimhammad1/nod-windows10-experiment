@@ -17,6 +17,7 @@ import {
 import { logFailure } from './failure-log.ts';
 import { cancelTurnOperations } from './turn-cancellation.ts';
 import { modelFailureReason, modelQuotaFailure } from '../shared/model-quota.ts';
+import { oversizedRequestLimit } from '../shared/oversized-request.ts';
 import { appPages } from '../shared/app-links.ts';
 import { pendingAnswerChoicesSql } from './answer-choices.ts';
 import { randomUUID } from 'node:crypto';
@@ -387,6 +388,36 @@ async function insertEvent(
       event?.detail ?? null,
     ],
   );
+}
+
+// Tool labels that report, search or take notes. They are not execution, so they never trigger the receipt.
+const quietTools = new Set([
+  'set status',
+  'tool search',
+  'skills',
+  'send message',
+  'ask user',
+  'share file',
+  'memory learn',
+  'history search',
+]);
+
+export function executionAckText(prompt: string) {
+  return /[\u0600-\u06ff]/.test(prompt)
+    ? 'تمام، بدأت أشتغل على طلبك.'
+    : "Got it, I've started working on this.";
+}
+
+// A short receipt written once, the first time a user turn really starts executing a tool.
+// It states only that work began, never an outcome, and is not the final reply.
+export async function insertExecutionAck(client: PoolClient, turn: TurnRef, prompt: string) {
+  const streamId = `ack:${turn.turnId}`;
+  const exists = await client.query(
+    'SELECT 1 FROM messages WHERE owner_id=$1 AND turn_id=$2 AND (stream_id=$3 OR role=$4) LIMIT 1',
+    [ownerId, turn.turnId, streamId, 'assistant'],
+  );
+  if (exists.rowCount) return;
+  await insertAssistantMessage(client, turn, executionAckText(prompt), [], streamId);
 }
 
 export async function recordIntent(client: PoolClient, turnId: string, line: string, steers = 0) {
@@ -1451,11 +1482,21 @@ function modelRecoveryAdvice(text: string) {
     return 'This account has no prepayment credits. Add credits with the provider or choose another connection.';
   if (quota?.kind === 'zero_quota')
     return 'This account has no quota for this model. Check its access or choose another model.';
-  const oversized = text.match(
-    /\brequest too large\b.{0,250}?\btokens per minute\s*\(TPM\):\s*Limit\s+(\d{1,9}),\s*Requested\s+(\d{1,9})/is,
-  );
-  if (oversized && Number(oversized[1]) > 0 && Number(oversized[2]) > Number(oversized[1]))
-    return 'Shorten the conversation or choose a model with a higher tokens-per-minute limit.';
+  if (quota?.kind === 'rate_limited') {
+    const seconds = (quota.retryAfterMs ?? 0) / 1000;
+    const hint =
+      seconds >= 60
+        ? ` Its suggested retry delay is about ${Math.ceil(seconds / 60)} minute${Math.ceil(seconds / 60) === 1 ? '' : 's'}.`
+        : seconds > 0
+          ? ` Its suggested retry delay is about ${Math.ceil(seconds)} seconds.`
+          : '';
+    return `The provider is rate-limiting requests right now.${hint} Retry in a moment, or choose another model or connection.`;
+  }
+  const oversized = oversizedRequestLimit(text);
+  if (oversized)
+    return oversized.requested - oversized.limit > 4000
+      ? `The provider reports a limit of ${oversized.limit.toLocaleString('en-US')} tokens per minute for this connection, and this request needs ${oversized.requested.toLocaleString('en-US')}. Nod's own instructions and tool definitions are part of every request, so even a short message exceeds it. Choose a model or connection with a higher limit.`
+      : 'Shorten the conversation or choose a model with a higher tokens-per-minute limit.';
   if (quota?.kind !== 'daily_quota') return '';
   const seconds = (quota.retryAfterMs ?? 0) / 1000;
   if (!seconds) return 'Check this connection’s daily limit or choose another model.';
@@ -1926,7 +1967,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       [ownerId, turn.session_id, turn.id],
     ),
     pool.query(
-      'SELECT time_zone,locale,hour_cycle,notification_rule,rules,quiet_hours_enabled,quiet_start,quiet_end,computer_use FROM preferences WHERE owner_id=$1',
+      'SELECT time_zone,locale,hour_cycle,notification_rule,rules,quiet_hours_enabled,quiet_start,quiet_end,computer_use,terse_output FROM preferences WHERE owner_id=$1',
       [ownerId],
     ),
     dependencies.accountProfile?.().catch(() => undefined),
@@ -1973,6 +2014,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       locale: preference?.locale || formattingLocale(timeZone ? timeZoneRegion(timeZone) : null),
       hourCycle: preference?.hour_cycle || defaultPreferences.hourCycle,
       notificationRule: preference?.notification_rule ?? defaultPreferences.notificationRule,
+      ...(preference?.terse_output ? { terseOutput: true as const } : {}),
       rules: preference?.rules ?? defaultPreferences.rules,
       quietHours: isQuietTime({
         ...defaultPreferences,
@@ -2395,8 +2437,21 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
         ),
       };
     };
+    const ackEligible =
+      turn.source === 'user' &&
+      !turn.background &&
+      turn.session_id === threadId &&
+      providerChannel === 'web' &&
+      !String(turn.source_id ?? '').startsWith('reaction-reply:');
+    let acknowledged = false;
     const emit = async (type: string, summary: string, event?: ExecutionEvent) => {
-      await current((client) => insertEvent(client, turnId, type, summary, event));
+      const ack = ackEligible && !acknowledged && type === 'tool_start' && !quietTools.has(summary);
+      if (ack) acknowledged = true;
+      await current(async (client) => {
+        await insertEvent(client, turnId, type, summary, event);
+        if (ack) await insertExecutionAck(client, ref, String(turn.prompt ?? ''));
+      });
+      if (ack) refresh();
       working();
     };
     const { reactToMessage, connections, browserConnection } = dependencies;

@@ -128,7 +128,7 @@ const usageOperations = [
 ];
 const protectedLists = ['failures', 'startupLog', 'settings', 'modelSettings', 'channelSettings'];
 const channels = ['web', 'telegram', 'whatsapp'];
-const efforts = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const efforts = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'auto'];
 const outcomes = ['succeeded', 'failed', 'cancelled'];
 const choice = (value: unknown, allowed: readonly string[], fallback = 'unknown') =>
   typeof value === 'string' && allowed.includes(value) ? value : fallback;

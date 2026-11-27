@@ -336,16 +336,37 @@ export function indexLayout(tree: Tree, options: { tentative?: boolean } = {}) {
   return index;
 }
 
-const matches = (tokens: string[], term: string) =>
-  tokens.some(
-    (token) => token === term || ((term.length > 2 || cjk.test(term)) && token.startsWith(term)),
-  );
+// Arabic clitic normalization for recall scoring only: drop a leading
+// conjunction/preposition letter (و ف ب ك ل) plus the definite article ال,
+// or ال alone, so a natural query term like "طيران" matches the stored
+// token "للطيران". Applied to both sides; too-short remainders keep the
+// original token. Dedup (same) intentionally does not use this.
+// Covers ال, و/ف/ب/ك+ال, and لل (ل+ال written without the aleph).
+const arabicClitic = /^(?:[وفبك]?ال|لل)/;
+const unclitic = (token: string) => {
+  const stripped = token.replace(arabicClitic, '');
+  return stripped.length > 2 ? stripped : token;
+};
+const matches = (tokens: string[], term: string) => {
+  const want = unclitic(term);
+  return tokens.some((token) => {
+    const got = unclitic(token);
+    return got === want || ((want.length > 2 || cjk.test(want)) && got.startsWith(want));
+  });
+};
 
-const brief = (entry: Entry) => ({
-  path: pathOf(entry),
-  abstract: abstractOf(entry),
-  status: statusOf(entry),
-});
+const brief = (entry: Entry) => {
+  // Notes without an explicit abstract fall back to their full text; cap
+  // that fallback so a find list stays bounded. memory_read {path} returns
+  // the complete note.
+  const abstract = abstractOf(entry);
+  return {
+    path: pathOf(entry),
+    abstract: abstract.length <= 400 ? abstract : `${abstract.slice(0, 400)}…`,
+    status: statusOf(entry),
+    ...(abstract.length > 400 ? { abstractShortened: true } : {}),
+  };
+};
 
 export function find(tree: Tree, query: string, within?: Area) {
   const terms = [...new Set(words(query))];

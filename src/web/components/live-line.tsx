@@ -3,78 +3,26 @@ import Markdown from 'react-markdown';
 import type { Activity } from '../../shared/contracts';
 import { Check, ChevronDown } from './icons';
 
-const quietMinutes = (since: string) => Math.floor((Date.now() - Date.parse(since)) / 60_000);
+const quietSeconds = (since: string) => {
+  const seconds = Math.floor((Date.now() - Date.parse(since)) / 1000);
+  return Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+};
 
-const idleWords = [
-  'Nodding along…',
-  'Nodding thoughtfully…',
-  'Connecting the nodes…',
-  'Wiring it up…',
-  'Untangling the wires…',
-  'Plugging in…',
-  'Workflowing…',
-  'Tracing the flow…',
-  'Following the thread…',
-  'Joining the dots…',
-  'Lining up the dominoes…',
-  'Lining things up…',
-  'Sketching a plan…',
-  'Doodling on a napkin…',
-  'Mapping it out…',
-  'Picking a path…',
-  'Rummaging…',
-  'Sorting the pile…',
-  'Shuffling the deck…',
-  'Squinting at the details…',
-  'Reading between the lines…',
-  'Turning it over…',
-  'Weighing it up…',
-  'Chasing a hunch…',
-  'Putting two and two together…',
-  'Counting on fingers…',
-  'Rolling up sleeves…',
-  'Looking under the hood…',
-  'Dusting off the toolbox…',
-  'Warming up the gears…',
-  'Oiling the cogs…',
-  'Flipping switches…',
-  'Tuning in…',
-  'Humming quietly…',
-  'Untying knots…',
-  'Nudging the pieces…',
-  'Polishing the plan…',
-  'Gathering threads…',
-  'Finding the right drawer…',
-  'Fitting the puzzle together…',
-];
-
-function useQuietMinutes(since: string, enabled: boolean) {
-  const [minutes, setMinutes] = useState(() => quietMinutes(since));
-  useEffect(() => {
-    setMinutes(quietMinutes(since));
-    if (!enabled) return;
-    const timer = setInterval(() => setMinutes(quietMinutes(since)), 15_000);
-    return () => clearInterval(timer);
-  }, [since, enabled]);
-  return enabled && minutes > 0 ? minutes : 0;
+export function elapsedLabel(seconds: number) {
+  if (seconds < 5) return '';
+  if (seconds < 60) return `${seconds} s`;
+  return `${Math.floor(seconds / 60)} min`;
 }
 
-function useIdleWord(enabled: boolean) {
-  const [order] = useState(() => {
-    const words = [...idleWords];
-    for (let index = words.length - 1; index > 0; index--) {
-      const pick = Math.floor(Math.random() * (index + 1));
-      [words[index], words[pick]] = [words[pick]!, words[index]!];
-    }
-    return words;
-  });
-  const [index, setIndex] = useState(0);
+function useQuietSeconds(since: string, enabled: boolean) {
+  const [seconds, setSeconds] = useState(() => quietSeconds(since));
   useEffect(() => {
+    setSeconds(quietSeconds(since));
     if (!enabled) return;
-    const timer = setInterval(() => setIndex((current) => (current + 1) % order.length), 2500);
+    const timer = setInterval(() => setSeconds(quietSeconds(since)), 1000);
     return () => clearInterval(timer);
-  }, [enabled, order]);
-  return order[index]!;
+  }, [since, enabled]);
+  return enabled ? seconds : 0;
 }
 
 export function LiveLine({
@@ -92,17 +40,21 @@ export function LiveLine({
   const label = useRef<HTMLSpanElement>(null);
   const step = item?.step?.trim();
   const site = item?.doing === 'tool' ? item.site : null;
-  const minutes = useQuietMinutes(item?.quietSince ?? '', quiet && Boolean(item));
+  const total = useQuietSeconds(item?.since ?? '', quiet && Boolean(item));
+  const sinceUpdate = useQuietSeconds(item?.quietSince ?? '', quiet && Boolean(item));
+  const elapsed = elapsedLabel(total);
+  const stalled = sinceUpdate >= 30 ? `no update for ${elapsedLabel(sinceUpdate)}` : '';
   const work =
     item?.doing === 'tool'
       ? item.tool
-      : item?.doing === 'model' && minutes && item.model
-        ? `Waiting for ${item.model}`
+      : item?.doing === 'model'
+        ? item.model
+          ? `Waiting for ${item.model}`
+          : 'Waiting for the model'
         : undefined;
   const described = step || (site && `Using ${site}`) || work;
   const queued = item?.doing === 'queued';
-  const word = useIdleWord(!described && !queued);
-  const meta = [step ? site || work : null, minutes ? `${minutes} min` : null]
+  const meta = [step ? site || work : null, elapsed || null, stalled || null]
     .filter(Boolean)
     .join(' · ');
   useEffect(() => {
@@ -115,12 +67,9 @@ export function LiveLine({
           {described}
         </Markdown>
       ) : queued ? (
-        'Working…'
+        'Waiting to start…'
       ) : (
-        <>
-          <span className="sr-only">Working…</span>
-          <span aria-hidden="true">{word}</span>
-        </>
+        'Working…'
       )}
       {meta && ` · ${meta}`}
     </span>

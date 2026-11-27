@@ -73,6 +73,10 @@ export interface ModelAccess {
   method: ModelMethod;
   definition: ModelDefinition;
   effort: ModelEffort;
+  // True when the stored selection is 'auto': effort above is the base
+  // resolution and the request-time layer may adapt it per request from the
+  // actual payload and learned quotas (never above the provider default).
+  effortAuto?: boolean;
   textModel?: { definition: ModelDefinition; effort: ModelEffort };
   read(): Promise<ModelCredential | undefined>;
   reserve?(

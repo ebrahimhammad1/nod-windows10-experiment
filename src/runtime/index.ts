@@ -35,9 +35,12 @@ import { BrowserActionError } from '../ports/computer.ts';
 import { threadIdentity } from '../ports/thread-identity.ts';
 import {
   compactHistory,
+  lastTurnHistory,
+  reopenMarkerHistory,
   compactMemory,
   compactOwnerContext,
   firstInstruction,
+  retrievalFirstTurn,
   observerInstruction,
   scheduledInstruction,
   ownerContext,
@@ -734,7 +737,16 @@ export function createAgentRuntime(dependencies: {
         completed = screened = true;
         return { status };
       }
-      if (dependencies.prepareMemory && !overBudget() && !context.spendingLimitReached) {
+      // Retrieval-first conversation turns skip the model-based memory
+      // selection (its 1-2 aux calls would dwarf an ordinary message, in
+      // BOTH context modes); saved facts stay reachable on demand through
+      // memory_find/memory_read via the nod_tool gateway.
+      if (
+        dependencies.prepareMemory &&
+        !overBudget() &&
+        !context.spendingLimitReached &&
+        !retrievalFirstTurn(context)
+      ) {
         context.memoryBrief = await untilAborted(
           dependencies.prepareMemory(
             context,
@@ -895,9 +907,29 @@ export function createAgentRuntime(dependencies: {
               },
             };
           });
+      // Terse output (optional owner setting, default off): always terses
+      // replies sent to external messages through tools; terses the whole
+      // answer only when the owner also selected a lower thinking level for
+      // the turn ('high' is the default level; 'auto' resolves per request
+      // and is not a lower selection).
+      const lowerSelectedEffort =
+        context.model?.effort !== 'auto' &&
+        ['off', 'minimal', 'low', 'medium'].includes(context.model?.effort ?? '');
+      const terse = context.terseOutput
+        ? lowerSelectedEffort
+          ? ('all' as const)
+          : ('external' as const)
+        : undefined;
       const system =
         context.proactivity?.instructions ??
-        systemPrompt(workspace, dependencies.skills, context.taskContext, context.background);
+        systemPrompt(
+          workspace,
+          dependencies.skills,
+          context.taskContext,
+          context.background,
+          false,
+          terse,
+        );
       const compactInstructions = {
         systemPrompt:
           context.proactivity?.instructions ??
@@ -907,6 +939,7 @@ export function createAgentRuntime(dependencies: {
             context.taskContext,
             context.background,
             true,
+            terse,
           ),
         ownerContext: compactOwnerContext(context),
       };
@@ -1150,6 +1183,7 @@ export function createAgentRuntime(dependencies: {
         contextRestart: context.contextRestart,
         ...(context.proactivity ? { restricted: true } : {}),
         newRequest: !context.resumed,
+        ...(retrievalFirstTurn(context) ? { deferTools: true } : {}),
         ...(context.scheduleCache ? { scheduleCache: context.scheduleCache } : {}),
         ...(sessionId === threadId && !context.proactivity && dependencies.keepWarm
           ? { keepWarm: () => dependencies.keepWarm!(threadId) }
@@ -1227,7 +1261,9 @@ export function createAgentRuntime(dependencies: {
             void pendingReplies.catch(() => {});
           }
           if (event.type === 'retry' && !stopped) {
-            const retry = `${event.model} failed, trying again (${event.attempt} of ${event.attempts})`;
+            const retry = event.detail
+              ? `${event.model}: ${event.detail}`
+              : `${event.model} failed, trying again (${event.attempt} of ${event.attempts})`;
             pendingReplies = pendingReplies.then(() =>
               context.emit('retry', retry, { execution }).catch(() => {}),
             );
@@ -1316,16 +1352,39 @@ export function createAgentRuntime(dependencies: {
       signal.throwIfAborted();
       const resumed = session.resumed;
       const compact = session.compactContext === true;
+      // Retrieval-first conversation turn (the owner-steered design: send
+      // the message with a minimal bootstrap; the model decides what it
+      // needs and retrieves it). Applies in BOTH context modes; task,
+      // background, proactive, scheduled, attachment, sign-in and
+      // failed-turn continuations keep the full context. Tools need no
+      // variant: they are already just-in-time via nod_tool.
+      const retrievalFirst = retrievalFirstTurn(context);
       const { images, omitted, analysis } = await inline(context.attachments, context.prompt);
       const requestContext = compact
         ? {
             ...context,
-            history: compactHistory(context.history),
+            history: retrievalFirst
+              ? resumed
+                ? lastTurnHistory(compactHistory(context.history))
+                : reopenMarkerHistory(context.history)
+              : compactHistory(context.history),
             relatedConversation: undefined,
-            tasks: [],
-            memoryBrief: context.memoryBrief && compactMemory(context.memoryBrief),
+            ...(retrievalFirst
+              ? // The prompt sends no task data; the task tool lists open work on demand.
+                { retrievalFirst: true, memoryBrief: undefined, tasks: [] }
+              : { tasks: [], memoryBrief: context.memoryBrief && compactMemory(context.memoryBrief) }),
           }
-        : context;
+        : retrievalFirst
+          ? {
+              ...context,
+              history: resumed
+                ? lastTurnHistory(compactHistory(context.history))
+                : reopenMarkerHistory(context.history),
+              memoryBrief: undefined,
+              retrievalFirst: true,
+              tasks: [],
+            }
+          : context;
       const observer = context.proactivity
         ? observerInstruction(
             requestContext,

@@ -93,7 +93,12 @@ export function createPersonalService(dependencies: PersonalDependencies) {
     const choice = connection?.models.find((model) => model.id === input.modelId);
     const effort =
       input.effort ?? (connection && choice && defaultEffort(connection.provider, choice));
-    if (!connection || !choice || !effort || !choice.efforts.includes(effort))
+    if (
+      !connection ||
+      !choice ||
+      !effort ||
+      (effort !== 'auto' && !choice.efforts.includes(effort))
+    )
       throw new Error('Choose an available model and effort from models_get.');
     const selection = { connectionId: connection.id, modelId: choice.id, effort };
     if (input.scope !== 'chat') models.validateChoice(selection);

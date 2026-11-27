@@ -19,6 +19,7 @@ import type {
   ModelLane,
   ModelMethod,
   ModelChoice,
+  ModelEffort,
   ModelProvider,
   ModelRoute,
   ModelRoutes,
@@ -51,6 +52,7 @@ import {
   defaultEffort,
   defaultModel,
   memoryModels,
+  resolveSelectionEffort,
 } from '../shared/model-defaults.ts';
 import { createDatabaseModelStore, type ModelRecord, type ModelState } from './model-store.ts';
 import { analyticsModel, snapshotAnalytics, type CaptureAnalytics } from './analytics.ts';
@@ -77,7 +79,10 @@ export const modelSelectionInput = z
   .object({
     connectionId: z.uuid(),
     modelId: z.string().min(1).max(200),
-    effort: z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
+    effort: z.union([
+      z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
+      z.literal('auto'),
+    ]),
   })
   .strict();
 class ConnectionError extends ModelRequestError {}
@@ -279,7 +284,9 @@ function usable(
         row.models.some(
           (model) =>
             model.choice.id === selection.modelId &&
-            model.choice.efforts.includes(selection.effort) &&
+            (selection.effort === 'auto'
+              ? model.choice.efforts.length > 0
+              : model.choice.efforts.includes(selection.effort)) &&
             (!model.choice.audio || Boolean(textCompanion(row))),
         ),
     )
@@ -312,6 +319,22 @@ const credentialTag = (value: ModelCredential | undefined) =>
     .digest('hex');
 const failureWindow = (failures: number) =>
   Math.min(120_000 * 3 ** Math.max(0, failures - 1), 6 * 3_600_000);
+// Card scope of a recorded failure. 401/402 are credential-wide on every
+// provider (rejected key, missing credits): they break every model on the
+// connection, so they stay on the card after a model switch. 403 is
+// provider-specific: a per-model plan/availability refusal (measured:
+// Cloudflare "@cf/... not available on the Workers Free plan") belongs to
+// that model, while any other 403 may be account-wide and stays
+// connection-scoped. Everything else is a model-level condition.
+export function failureScope(status: number | undefined, reason: string): 'connection' | 'model' {
+  if (status === 401 || status === 402) return 'connection';
+  if (status === 403)
+    return /not available|no access|does not have access|not enabled|not supported/i.test(reason)
+      ? 'model'
+      : 'connection';
+  return 'model';
+}
+
 function failures(row: Pick<ModelRecord, 'requestFailures'> | undefined, tag: string | undefined) {
   return Object.entries(row?.requestFailures ?? {}).filter(
     ([, failure]) => tag && failure.credentialTag === tag,
@@ -450,6 +473,7 @@ export function createModelService(options: {
       const value = row.managed ? options.bootstrap?.credentials[row.provider] : saved;
       const tag = credentialTag(value);
       const failed = failures(row, tag).sort(([, a], [, b]) => b.retryAt - a.retryAt);
+      const credentialWide = failed.filter(([, item]) => item.scope !== 'model');
       return {
         ...row,
         credentialTag: tag,
@@ -462,7 +486,9 @@ export function createModelService(options: {
           : {}),
         ...(failed.length
           ? {
-              issue: { reason: failed[0]![1].reason },
+              ...(credentialWide.length
+                ? { issue: { reason: credentialWide[0]![1].reason } }
+                : {}),
               issues: Object.fromEntries(failed.map(([id, item]) => [id, { reason: item.reason }])),
               retry: Object.fromEntries(failed.map(([id, item]) => [id, item.retryAt])),
             }
@@ -578,15 +604,17 @@ export function createModelService(options: {
                   ? previous.failures
                   : (previous?.failures ?? 0) + 1;
               saved.requestFailures = Object.fromEntries(current);
+              const reason = redactSecretText(modelFailureReason(error))
+                .replace(/\s*\[request phase: [^\]]*\]\s*$/, '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 300);
               saved.requestFailures[modelId] = {
                 credentialTag: tag,
                 failures: count,
+                scope: failureScope(status, reason),
                 retryAt: Date.now() + failureWindow(count),
-                reason: redactSecretText(modelFailureReason(error))
-                  .replace(/\s*\[request phase: [^\]]*\]\s*$/, '')
-                  .replace(/\s+/g, ' ')
-                  .trim()
-                  .slice(0, 300),
+                reason,
               };
               if (status === 401 && !saved.managed && saved.status === 'connected')
                 saved.status = 'reconnect';
@@ -720,13 +748,31 @@ export function createModelService(options: {
       (auxiliary
         ? row.models.find((model) => model.choice.id === memoryModels[row.provider])
         : undefined) ?? row.models.find((model) => model.choice.id === selected.modelId);
-    if (!definition || (!definition.choice.efforts.includes(selected.effort) && !auxiliary))
+    if (!definition)
+      throw new ConnectionError(
+        `The selected model is unavailable on this connection (${row.provider} / ${selected.modelId}). Reload its models or choose another model in ${appPages['/settings/models']}.`,
+      );
+    // 'auto' resolves to a concrete level here (base resolution, no request
+    // signal yet); the request-time layer adapts it per payload - see
+    // access.effortAuto.
+    const effortAuto = !auxiliary && selected.effort === 'auto';
+    const resolvedEffort: ModelEffort =
+      selected.effort === 'auto'
+        ? resolveSelectionEffort(row.provider, definition.choice, 'auto')
+        : selected.effort;
+    if (!definition.choice.efforts.includes(resolvedEffort) && !auxiliary)
       throw new ConnectionError(
         `The selected model is unavailable on this connection (${row.provider} / ${selected.modelId}). Reload its models or choose another model in ${appPages['/settings/models']}.`,
       );
     const companion = definition.choice.audio ? textCompanion(row) : undefined;
     if (definition.choice.audio && !companion) throw missingTextCompanion();
-    return { selected, row, definition, companion };
+    return {
+      selected: { connectionId: selected.connectionId, modelId: selected.modelId, effort: resolvedEffort },
+      effortAuto,
+      row,
+      definition,
+      companion,
+    };
   }
   function unpricedPreparationModel() {
     try {
@@ -760,7 +806,13 @@ export function createModelService(options: {
     const definition =
       row?.status === 'connected' &&
       row.models.find((item) => item.choice.id === value.modelId && !item.choice.audio);
-    if (!row || !definition || !definition.choice.efforts.includes(value.effort))
+    if (
+      !row ||
+      !definition ||
+      (value.effort === 'auto'
+        ? !definition.choice.efforts.length
+        : !definition.choice.efforts.includes(value.effort))
+    )
       throw Object.assign(new ConnectionError('Choose an available text model and effort.'), {
         statusCode: 400,
       });
@@ -971,12 +1023,14 @@ export function createModelService(options: {
     const choice = choices.find((model) => model.id === selected?.modelId);
     if (
       selected?.connectionId === id &&
+      selected.effort !== 'auto' &&
       choice?.efforts.length &&
       !choice.efforts.includes(selected.effort)
     )
       selected.effort = lightestEffort(choice.efforts);
     for (const route of Object.values(state.routes)) {
       if (!route || route === 'light' || route.connectionId !== id) continue;
+      if (route.effort === 'auto') continue;
       const routed = choices.find((model) => model.id === route.modelId);
       if (routed?.efforts.length && !routed.efforts.includes(route.effort))
         route.effort = lightestEffort(routed.efforts);
@@ -1343,7 +1397,12 @@ export function createModelService(options: {
       const definition = row?.models.find((model) => model.choice.id === work.selection.modelId);
       if (row?.status !== 'connected' || !definition || definition.choice.audio)
         throw unavailable(work, origin.kind, row);
-      if (definition.choice.efforts.includes(work.selection.effort)) return work;
+      if (
+        work.selection.effort === 'auto'
+          ? definition.choice.efforts.length > 0
+          : definition.choice.efforts.includes(work.selection.effort)
+      )
+        return work;
       return {
         ...work,
         selection: { ...work.selection, effort: defaultEffort(row.provider, definition.choice) },
@@ -1364,9 +1423,12 @@ export function createModelService(options: {
             definition,
             effort: auxiliary
               ? auxiliaryEffort(definition.choice.efforts)
-              : definition.choice.efforts.includes(item.effort)
-                ? item.effort
-                : defaultEffort(row.provider, definition.choice),
+              : item.effort === 'auto'
+                ? resolveSelectionEffort(row.provider, definition.choice, 'auto')
+                : definition.choice.efforts.includes(item.effort)
+                  ? item.effort
+                  : defaultEffort(row.provider, definition.choice),
+            ...(item.effort === 'auto' && !auxiliary ? { effortAuto: true as const } : {}),
             ...requestAccess(row),
             needsReconnect: (credential) =>
               needsReconnect(row.id, { models: row.models, credential }),
@@ -1439,9 +1501,27 @@ export function createModelService(options: {
             label,
             status,
             managed,
-            ...(issue ? { issue } : {}),
+            // The card must name the SELECTED model's state, not a failure
+            // recorded for another model on the same connection: after the
+            // owner switches models, the old model's rejection (measured:
+            // a DeepSeek 403 shown while GLM was selected) must stop marking
+            // the card. Other models' failures stay visible per model.
+            ...(selection?.connectionId === id
+              ? (() => {
+                  const selectedIssue = service.issue({
+                    connectionId: id,
+                    modelId: selection.modelId,
+                  });
+                  return selectedIssue ? { issue: selectedIssue } : issue ? { issue } : {};
+                })()
+              : issue
+                ? { issue }
+                : {}),
             models: models.map((model) => ({
               ...model.choice,
+              ...(service.issue({ connectionId: id, modelId: model.choice.id })
+                ? { issue: service.issue({ connectionId: id, modelId: model.choice.id }) }
+                : {}),
               pricing: modelPricing(model),
               ...(model.choice.audio
                 ? { textModelName: textCompanion({ provider, method, models })?.choice.name }
@@ -1451,6 +1531,26 @@ export function createModelService(options: {
           }),
         ),
         selection,
+        // With a stored 'auto' the owner sees the level it currently
+        // resolves to; the request-time layer may adapt it further per turn.
+        ...(selection?.effort === 'auto'
+          ? (() => {
+              const sel = selection;
+              const row = rows.find((item) => item.id === sel.connectionId);
+              const definition = row?.models.find(
+                (model) => model.choice.id === sel.modelId,
+              );
+              return row && definition
+                ? {
+                    resolvedEffort: resolveSelectionEffort(
+                      row.provider,
+                      definition.choice,
+                      'auto',
+                    ),
+                  }
+                : {};
+            })()
+          : {}),
         ...(selectionIssue ? { selectionIssue } : {}),
         routes,
         backups,
@@ -1564,7 +1664,13 @@ export function createModelService(options: {
           const model =
             row?.status === 'connected' &&
             row.models.find((item) => item.choice.id === value.modelId);
-          if (!row || !model || !model.choice.efforts.includes(value.effort))
+          if (
+            !row ||
+            !model ||
+            (value.effort === 'auto'
+              ? !model.choice.efforts.length
+              : !model.choice.efforts.includes(value.effort))
+          )
             throw new ConnectionError('Choose an available model and effort.');
           if (model.choice.audio && !textCompanion(row)) throw missingTextCompanion();
           const changed = {
@@ -1638,7 +1744,9 @@ export function createModelService(options: {
               ? {
                   ...analyticsModel(provider, selection.modelId),
                   provider,
-                  effort: selection.effort,
+                  // the analytics event only accepts concrete effort levels;
+                  // the stored 'auto' mode is omitted rather than resolved
+                  ...(selection.effort === 'auto' ? {} : { effort: selection.effort }),
                 }
               : {}),
           },
@@ -1704,13 +1812,14 @@ export function createModelService(options: {
       auxiliary = false,
       choice: ModelSelection | null = selection,
     ): Promise<ModelAccess> {
-      const { selected, row, definition, companion } = chosen(auxiliary, choice);
+      const { selected, effortAuto, row, definition, companion } = chosen(auxiliary, choice);
       return {
         connectionId: row.id,
         provider: row.provider,
         method: row.method,
         definition,
         effort: auxiliary ? auxiliaryEffort(definition.choice.efforts) : selected.effort,
+        ...(effortAuto ? { effortAuto } : {}),
         ...(companion
           ? {
               textModel: {

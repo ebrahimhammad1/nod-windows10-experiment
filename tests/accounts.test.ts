@@ -6999,9 +6999,58 @@ async function notificationPage(t: import('node:test').TestContext) {
       this.onshow?.();
     }
   }
+  // Node and jsdom both lack navigator.locks, so the page gets a synthetic
+  // LockManager with real exclusive-lock semantics: queued requests wait,
+  // ifAvailable yields undefined when held, and an abort signal cancels a
+  // still-queued request (per spec, aborting a GRANTED lock is a no-op).
+  const syntheticLocks = (() => {
+    const held = new Map<string, { queue: (() => void)[] }>();
+    return {
+      request: async (
+        name: string,
+        optionsOrCallback: { signal?: AbortSignal; ifAvailable?: boolean } | ((lock: { name: string } | undefined) => unknown),
+        maybeCallback?: (lock: { name: string } | undefined) => unknown,
+      ) => {
+        const options = typeof optionsOrCallback === 'function' ? {} : (optionsOrCallback ?? {});
+        const callback = (typeof optionsOrCallback === 'function'
+          ? optionsOrCallback
+          : maybeCallback)!;
+        if (options.signal?.aborted) throw new dom.window.DOMException('The lock request was aborted.', 'AbortError');
+        const existing = held.get(name);
+        if (existing) {
+          if (options.ifAvailable) return callback(undefined);
+          await new Promise<void>((resolve, reject) => {
+            const waiter = () => {
+              options.signal?.removeEventListener('abort', onAbort);
+              resolve();
+            };
+            const onAbort = () => {
+              const index = existing.queue.indexOf(waiter);
+              if (index >= 0) existing.queue.splice(index, 1);
+              reject(new dom.window.DOMException('The lock request was aborted.', 'AbortError'));
+            };
+            options.signal?.addEventListener('abort', onAbort, { once: true });
+            existing.queue.push(waiter);
+          });
+        }
+        const entry = { queue: [] as (() => void)[] };
+        held.set(name, entry);
+        try {
+          return await callback({ name });
+        } finally {
+          held.delete(name);
+          entry.queue.shift()?.();
+        }
+      },
+      query: async () => ({
+        held: [...held.keys()].map((name) => ({ name, clientId: 'synthetic' })),
+        pending: [],
+      }),
+    };
+  })();
   Object.defineProperty(dom.window.navigator, 'locks', {
     configurable: true,
-    value: navigator.locks,
+    value: syntheticLocks,
   });
   Object.defineProperties(dom.window, {
     Notification: { configurable: true, value: SyntheticNotification },
@@ -7987,7 +8036,7 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
         time_zone text,quiet_start text NOT NULL DEFAULT '22:00',quiet_end text NOT NULL DEFAULT '08:00',
         quiet_hours_enabled boolean NOT NULL DEFAULT true,locale text,hour_cycle text NOT NULL DEFAULT 'auto',
         speech_voice text,speech_reply text NOT NULL DEFAULT 'auto',proactive_paused boolean NOT NULL DEFAULT false,
-        local_files_enabled boolean NOT NULL DEFAULT false)`);
+        local_files_enabled boolean NOT NULL DEFAULT false,terse_output boolean NOT NULL DEFAULT false)`);
     const captured: Parameters<ProductAnalytics['capture']>[0][] = [];
     const analytics = await createAnalytics({
       provider: { capture: (event) => captured.push(event), shutdown: async () => {} },
