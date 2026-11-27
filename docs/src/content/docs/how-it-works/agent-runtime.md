@@ -325,6 +325,12 @@ The runtime's conversation guidance defines these message breaks. The confirmati
 
 Workspace images include a pinned [RTK](https://github.com/rtk-ai/rtk). Supported simple Bash commands are rewritten to RTK inside the workspace for compact Git, file, search, test and build output. Pipes, redirection, machine-output flags, bare `git log` and `find` stay raw. RTK's `find` skips hidden and ignored folders such as `.nod`, where Nod keeps its working files. Unsupported commands fall back before they run, and executed commands are never retried. `rtk proxy <command>` gives exact output. The rules are in [`src/providers/pi/sandbox.ts`](https://github.com/n8n-io/nod/blob/main/src/providers/pi/sandbox.ts).
 
+## Known issues
+
+**A call to a deferred tool can be silently ignored.** Deferred tools load on demand through `tool_search` or codemode. When the model calls a deferred tool directly by name before it is loaded, Nod ignores that call: nothing runs, no error comes back and the model is not asked to retry, so a turn can finish with the tool never having run. This is existing behaviour, not a fix.
+
+Tests that pin how unknown or inactive tool names are handled: `tests/payload-budget.test.ts` "a model that guesses an unknown tool name is sent to discovery, not executed" and "the nod_tool gateway refuses always-on and unknown tools with a corrective error"; `tests/pi.test.ts` "invalid tool calls stop before another model request and a valid repair resets the limit"; and the older ACK-persistence test "real Pi saves its user message and tool call before a side effect", which routes its side effect through the `nod_tool` gateway. The ACK persistence problem itself was fixed in a separate change; this note only records how a direct call to a deferred tool behaves.
+
 ## Related resources
 
 - [Architecture](/how-it-works/architecture/)
